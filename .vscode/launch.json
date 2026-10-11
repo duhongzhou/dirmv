@@ -74,6 +74,15 @@
             "environment": [],
             "console": "newExternalWindow",
             "preLaunchTask": "CMake: 构建 (Debug)"
+        },
+        {
+            // 一键生成安装包 (MSI)：不调试，直接在集成终端运行打包脚本
+            // 会先执行 "CMake: 构建 (Release)"，再调用 build_installer.ps1
+            "name": "生成安装包 (MSI)",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "powershell -ExecutionPolicy Bypass -File \"${workspaceFolder}/installer/build_installer.ps1\" -Config Release",
+            "preLaunchTask": "CMake: 构建 (Release)"
         }
     ]
 }
