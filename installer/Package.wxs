@@ -25,10 +25,17 @@
     <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 dirMover，请先卸载。" />
     <MediaTemplate EmbedCab="yes" />
 
-    <!-- 需要管理员权限（创建符号链接 / 安装服务） -->
-    <Launch
-        Condition="NOT Privileged"
-        Message="请以管理员身份运行安装程序（创建符号链接与安装服务需要管理员权限）。" />
+    <!--
+      说明：perMachine 安装本身就要求管理员权限，Windows Installer 会自动触发 UAC 提权。
+      这里不再放置自定义的 "NOT Privileged" 检查——该检查在部分环境下会误判
+      （即使以管理员运行也拦截），导致无法安装。
+      若要禁止非管理员安装，改用下面注释的 InstallScope 校验（在 AppSearch/Launch 之前
+      序列执行更可靠），或直接依赖 perMachine 的默认提权行为。
+    -->
+    <!-- 可选：仅允许提权安装（默认注释，避免误判）
+    <Launch Condition="Privileged OR (VersionNT &gt;= 600 AND MsiRunningElevated)"
+            Message="请以管理员身份运行安装程序。" />
+    -->
 
     <!-- ================= 目录结构 ================= -->
     <StandardDirectory Id="ProgramFiles64Folder">
