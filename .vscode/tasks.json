@@ -94,6 +94,57 @@
             ],
             "dependsOn": "CMake: 构建 (Release)",
             "problemMatcher": []
+        },
+        {
+            "label": "生成安装包 (MSI)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/installer/build_installer.ps1",
+                "-Config",
+                "Release"
+            ],
+            "dependsOn": "CMake: 构建 (Release)",
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "生成安装包 (MSI, 指定版本)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/installer/build_installer.ps1",
+                "-Config",
+                "Release",
+                "-Version",
+                "${input:installerVersion}"
+            ],
+            "dependsOn": "CMake: 构建 (Release)",
+            "problemMatcher": [],
+            "group": "build"
+        },
+        {
+            "label": "打开安装包输出目录",
+            "type": "shell",
+            "command": "explorer.exe",
+            "args": [
+                "${workspaceFolder}/installer/dist"
+            ],
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "installerVersion",
+            "type": "promptString",
+            "description": "安装包版本号 (例如 1.0.0)",
+            "default": "1.0.0"
         }
     ]
 }
