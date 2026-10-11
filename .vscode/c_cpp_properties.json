@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/**"
+            ],
+            "defines": [
+                "UNICODE",
+                "_UNICODE",
+                "WIN32_LEAN_AND_MEAN",
+                "NOMINMAX",
+                "_CRT_SECURE_NO_WARNINGS"
+            ],
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-msvc-x64"
+        }
+    ],
+    "version": 4
+}

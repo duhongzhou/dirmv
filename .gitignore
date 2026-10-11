@@ -1,0 +1,18 @@
+# 构建产物
+build/
+out/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+
+# 配置与日志（运行时生成）
+dirmv.ini
+*.log
+link_restore_log.txt
+
+# 测试
+_test/
+test/sandbox/
+installer/dist/

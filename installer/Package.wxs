@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Package.wxs - WiX v5 MSI 安装包定义
+  用法见 build_installer.ps1：
+      先安装 WiX 5 全局工具，再执行
+      wix build installer\Package.wxs -o installer\dist\dirMover-1.0.0.msi -arch x64
+
+  安装内容：
+    - dirMover.exe      图形界面 / 服务主程序
+    - dirMover_cli.exe  命令行工具
+    - dirmv.ini         默认配置（若已存在则不覆盖）
+  特性：
+    - 开始菜单快捷方式
+    - 卸载时自动停止并删除 Windows 服务
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <Package Name="dirMover 目录迁移工具"
+           Manufacturer="dirMover"
+           Version="1.0.0.0"
+           UpgradeCode="7F2C9E3A-4B51-4D6E-9A2F-1C8D5E7B0A31"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 dirMover，请先卸载。" />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 需要管理员权限（创建符号链接 / 安装服务） -->
+    <Launch
+        Condition="NOT Privileged"
+        Message="请以管理员身份运行安装程序（创建符号链接与安装服务需要管理员权限）。" />
+
+    <!-- ================= 目录结构 ================= -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="dirMover" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutFolder" Name="dirMover" />
+    </StandardDirectory>
+
+    <!-- ================= 主程序 ================= -->
+    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
+      <Component Id="cmpMainExe" Guid="A1B2C3D4-1111-2222-3333-444455556666">
+        <File Id="filMainExe" Source="..\build\Release\dirMover.exe" KeyPath="yes" />
+      </Component>
+
+      <Component Id="cmpCliExe" Guid="A1B2C3D4-1111-2222-3333-444455556667">
+        <File Id="filCliExe" Source="..\build\Release\dirMover_cli.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- 默认配置：若目标已存在则不覆盖（NeverOverwrite + Permanent-friendly） -->
+    <ComponentGroup Id="ConfigComponents" Directory="INSTALLFOLDER">
+      <Component Id="cmpConfig" Guid="A1B2C3D4-1111-2222-3333-444455556668" NeverOverwrite="yes">
+        <File Id="filConfig" Source="config\dirmv.ini" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ================= 开始菜单快捷方式 ================= -->
+    <ComponentGroup Id="ShortcutComponents" Directory="AppShortcutFolder">
+      <Component Id="cmpShortcut" Guid="A1B2C3D4-1111-2222-3333-444455556669">
+        <Shortcut Id="scMain"
+                  Name="dirMover 目录迁移工具"
+                  Description="监视目录并迁移到目标目录并创建链接"
+                  Target="[INSTALLFOLDER]dirMover.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="rmAppShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\dirMover" Name="installed"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ================= 服务安装/卸载（可选，使用 util:ServiceConfig） ========= -->
+    <!-- 卸载时停止并删除服务（忽略不存在的情况） -->
+    <CustomAction Id="StopService" Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[SystemFolder]sc.exe&quot; stop dirMoverSvc"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <CustomAction Id="DeleteService" Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[SystemFolder]sc.exe&quot; delete dirMoverSvc"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- 卸载时先停服务再删服务 -->
+      <Custom Action="StopService"   Before="DeleteService" Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="DeleteService" Before="RemoveFiles"   Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <Feature Id="MainFeature" Title="dirMover" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="MainComponents" />
+      <ComponentGroupRef Id="ConfigComponents" />
+      <ComponentGroupRef Id="ShortcutComponents" />
+    </Feature>
+
+  </Package>
+</Wix>

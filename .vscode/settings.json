@@ -1,0 +1,15 @@
+{
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.generator": "Visual Studio 18 2026",
+    "cmake.platform": "x64",
+    "cmake.configureOnOpen": true,
+    "cmake.configureArgs": [
+        "-A",
+        "x64"
+    ],
+    "files.encoding": "utf8",
+    "files.eol": "\r\n",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.intelliSenseMode": "windows-msvc-x64"
+}

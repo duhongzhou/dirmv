@@ -1,0 +1,11 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+    <PropertyGroup>
+        <OutputName>dirMover-1.0.0</OutputName>
+        <OutputType>Package</OutputType>
+        <DefineConstants>Configuration=Release</DefineConstants>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="Package.wxs" />
+    </ItemGroup>
+</Project>

@@ -1,0 +1,99 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: 配置",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S",
+                "${workspaceFolder}",
+                "-B",
+                "${workspaceFolder}/build",
+                "-G",
+                "Visual Studio 18 2026",
+                "-A",
+                "x64"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "CMake: 构建 (Release)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Release"
+            ],
+            "dependsOn": "CMake: 配置",
+            "problemMatcher": [
+                "$msCompile"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "CMake: 构建 (Debug)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build",
+                "--config",
+                "Debug"
+            ],
+            "dependsOn": "CMake: 配置",
+            "problemMatcher": [
+                "$msCompile"
+            ]
+        },
+        {
+            "label": "CMake: 重新配置 (清缓存)",
+            "type": "shell",
+            "command": "cmake",
+            "args": [
+                "-S",
+                "${workspaceFolder}",
+                "-B",
+                "${workspaceFolder}/build",
+                "-G",
+                "Visual Studio 18 2026",
+                "-A",
+                "x64",
+                "--fresh"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "运行 GUI (Release)",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Release/dirMover.exe",
+            "dependsOn": "CMake: 构建 (Release)",
+            "problemMatcher": []
+        },
+        {
+            "label": "运行 CLI: scan",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Release/dirMover_cli.exe",
+            "args": [
+                "scan"
+            ],
+            "dependsOn": "CMake: 构建 (Release)",
+            "problemMatcher": []
+        },
+        {
+            "label": "运行 CLI: migrate",
+            "type": "shell",
+            "command": "${workspaceFolder}/build/Release/dirMover_cli.exe",
+            "args": [
+                "migrate"
+            ],
+            "dependsOn": "CMake: 构建 (Release)",
+            "problemMatcher": []
+        }
+    ]
+}

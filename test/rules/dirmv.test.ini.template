@@ -1,0 +1,40 @@
+; ---------------------------------------------------------------------------
+; dirmv.test.ini - 测试规则文件（模板）
+;
+; 用途：供 test\clitest.ps1 / test\guitest.ps1 导入并反复使用。
+;   · 所有目录都指向测试沙箱 test\sandbox 之下，绝不影响真实目录。
+;   · 占位符 {SANDBOX} 会在运行时被替换为 test\sandbox 的绝对路径。
+;   · {RULES} 会被替换为具体的 [RuleN] 段落（见脚本生成）。
+;
+; 注意：本文件由脚本生成/替换；直接手改不会生效（配置带 HMAC 签名）。
+; ---------------------------------------------------------------------------
+
+{RULES}
+
+[Migrate]
+LinkType=1
+MoveMode=1
+SkipExisting=1
+WorkerThreads=2
+EnableWatcher=0
+
+[Schedule]
+Period=0
+Hour=2
+Minute=0
+WeekdayMask=0
+DayOfMonth=1
+EveryNDays=3
+
+[Lock]
+Detect=1
+RetryDelayMinutes=5
+Notify=1
+
+[Service]
+ServiceName=dirMoverSvc
+ServiceThreads=2
+
+[Log]
+LogToFile=1
+LogLevel=1
