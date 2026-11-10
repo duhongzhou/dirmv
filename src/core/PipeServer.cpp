@@ -91,26 +91,30 @@ namespace dirmv
 
         while (running_.load())
         {
-            // 允许 Everyone 读写（服务与普通权限 GUI 通信）
+            // 仅允许 SYSTEM / 管理员 / 本机交互式用户控制服务。
+            // 注意：绝不能用 Everyone(WD)——否则任何低权限进程都能命令
+            // SYSTEM 服务执行迁移/恢复/停止，属于本地权限提升面。
             SECURITY_ATTRIBUTES sa{};
             sa.nLength = sizeof(sa);
             sa.bInheritHandle = FALSE;
             PSECURITY_DESCRIPTOR sd = nullptr;
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &sd, nullptr);
+                L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)", SDDL_REVISION_1, &sd, nullptr);
             sa.lpSecurityDescriptor = sd;
 
             HANDLE hPipe = CreateNamedPipeW(
                 pipeName_.c_str(),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT |
+                    PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES, 8192, 8192, 0, &sa);
             if (sd)
                 LocalFree(sd);
 
             if (hPipe == INVALID_HANDLE_VALUE)
             {
-                LOGW(L"创建命名管道失败，稍后重试");
+                LOGW(L"创建命名管道失败(错误 " +
+                     std::to_wstring(GetLastError()) + L")，稍后重试");
                 WaitForSingleObject(hStop, 1000);
                 continue;
             }

@@ -141,6 +141,37 @@ namespace dirmv
         // 日志路径（每个目标目录一个日志文件）
         std::wstring LogPathFor(const std::wstring &targetDir) const;
 
+        // -------------------------------------------------------------------
+        // 崩溃残留恢复：上次迁移中途崩溃/断电后，源目录旁可能留下
+        //   <name>.dirmv-moving  —— 源目录已原子改名，链接尚未创建
+        //   <name>.dirmv-old     —— 链接已创建，旧数据未能删除（或改名失败）
+        // 本方法在不删除任何唯一副本的前提下尽量自愈：
+        //   · 目标已有完整数据、源名空缺 → 补建链接（真正完成迁移）
+        //   · 目标没有数据、源名空缺   → 把残留目录改回原名（恢复原状）
+        //   · 链接已存在、目标存在     → 残留是重复数据，安全删除（被占用则保留）
+        // 其余情况一律保留并报告，交人工确认。
+        // dryRun=true 只分析不修改磁盘。
+        // -------------------------------------------------------------------
+        struct RecoverItem
+        {
+            std::wstring path;   // 残留目录完整路径
+            std::wstring action; // 处理说明
+            int kind = 0;        // 1=补建链接 2=还原原名 3=清理重复 4=保留
+        };
+        struct RecoverReport
+        {
+            int scanned = 0;
+            int relinked = 0;
+            int restored = 0;
+            int cleaned = 0;
+            int kept = 0;
+            bool dryRun = false;
+            std::vector<RecoverItem> items;
+            bool any() const { return scanned > 0; }
+        };
+        RecoverReport RecoverRule(const Rule &rule, bool dryRun = false,
+                                  std::atomic<bool> *cancel = nullptr);
+
         // 扫描接管：检测监视目录下已有的链接与目标目录下的文件夹，
         // 补全规则的 migrated 清单；返回需提醒的外部链接等。
         // 不修改磁盘，只分析并更新 rule.migrated（引用传入）。

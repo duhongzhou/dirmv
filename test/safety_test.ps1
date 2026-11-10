@@ -5,6 +5,9 @@
 #   2. 源目录被占用：不迁移、源结构完整、目标不留下数据
 #   3. 目录联接(Junction)：创建的是真正的联接，数据可读
 #   4. 白名单命令：exclude / unexclude 生效
+#   5. 崩溃恢复：.dirmv-moving + 目标数据完整 → 补建链接并清理重复
+#   6. 崩溃恢复：.dirmv-moving 无目标数据 → 还原原名（绝不丢弃）
+#   7. 崩溃恢复：链接已就绪 + .dirmv-old → 清理重复副本
 #   全部在 test\sandbox 下运行，不碰真实目录。
 # ---------------------------------------------------------------------------
 param([string]$Config = "Release")
@@ -128,6 +131,57 @@ $o = Invoke-CliText -ConfigPath $cfg -CliArgs @("unexclude", "--index", "0", "--
 if ($o -match "已从白名单移除") { Ok "unexclude 命令成功" } else { Bad "unexclude 命令失败: $($o.Trim())" }
 $scan = Invoke-CliText -ConfigPath $cfg -CliArgs @("scan")
 if ($scan -match "A") { Ok "移除后重新出现在待迁移列表" } else { Bad "移除后仍未出现在待迁移列表" }
+
+# ---------------------------------------------------------------------------
+Head "安全测试5: 崩溃恢复（.dirmv-moving + 目标已完整 → 补链接并清理）"
+$src = "$sandk\s5\src"; $dst = "$sandk\s5\dst"
+New-TestTree -Base $src -Sandbox $sandk
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+$cfg = "$sandk\s5.ini"
+Write-Config -Path $cfg -Rules @(@{ w = $src; t = $dst; ex = "Desktop" }) -LinkType $linkType
+# 模拟「复制完成 + 源已改名 + 链接尚未创建」的崩溃现场
+Copy-Item -Recurse -Force "$src\A" "$dst\A"
+Move-Item -Force "$src\A" "$src\A.dirmv-moving"
+$o = Invoke-CliText -ConfigPath $cfg -CliArgs @("recover", "--dry-run")
+if ($o -match "预演" -and $o -match "补链接") { Ok "预演报告将补建链接" } else { Bad "预演输出不符: $($o.Trim())" }
+if ((Test-Path "$src\A.dirmv-moving") -and -not (Test-Path "$src\A")) { Ok "预演未修改磁盘" } else { Bad "预演修改了磁盘" }
+$o = Invoke-CliText -ConfigPath $cfg -CliArgs @("recover")
+if ($o -match "补建链接 1") { Ok "实际恢复补建了链接" } else { Bad "恢复汇总不符: $($o.Trim())" }
+$ait = Get-Item "$src\A" -Force
+if ($ait.Attributes -band [IO.FileAttributes]::ReparsePoint) { Ok "源名称已补为链接" } else { Bad "恢复后源名称不是链接" }
+if (-not (Test-Path "$src\A.dirmv-moving")) { Ok "已清理重复残留" } else { Bad "残留未清理" }
+if ((Get-Content "$src\A\sub\a.txt") -eq "helloA") { Ok "经恢复链接读取数据正确" } else { Bad "恢复后数据读取错误" }
+
+# ---------------------------------------------------------------------------
+Head "安全测试6: 崩溃恢复（.dirmv-moving 无目标数据 → 还原原名，绝不丢弃）"
+$src = "$sandk\s6\src"; $dst = "$sandk\s6\dst"
+New-TestTree -Base $src -Sandbox $sandk
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+$cfg = "$sandk\s6.ini"
+Write-Config -Path $cfg -Rules @(@{ w = $src; t = $dst; ex = "Desktop" }) -LinkType $linkType
+Move-Item -Force "$src\A" "$src\A.dirmv-moving"
+$o = Invoke-CliText -ConfigPath $cfg -CliArgs @("recover")
+if ($o -match "还原原名 1") { Ok "恢复报告还原原名" } else { Bad "恢复汇总不符: $($o.Trim())" }
+$ait = Get-Item "$src\A" -Force -ErrorAction SilentlyContinue
+if ($ait -and -not ($ait.Attributes -band [IO.FileAttributes]::ReparsePoint)) { Ok "已还原为实体目录" } else { Bad "未还原原名" }
+if (-not (Test-Path "$src\A.dirmv-moving")) { Ok "无残留" } else { Bad "仍有残留" }
+if ((Get-Content "$src\A\sub\a.txt") -eq "helloA") { Ok "还原后数据完整" } else { Bad "还原后数据丢失" }
+if (Test-Path "$dst\A") { Bad "不应在目标留下数据" } else { Ok "目标未留下半成品" }
+
+# ---------------------------------------------------------------------------
+Head "安全测试7: 崩溃恢复（链接已就绪 + .dirmv-old → 清理重复副本）"
+$src = "$sandk\s7\src"; $dst = "$sandk\s7\dst"
+New-TestTree -Base $src -Sandbox $sandk
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+$cfg = "$sandk\s7.ini"
+Write-Config -Path $cfg -Rules @(@{ w = $src; t = $dst; ex = "Desktop" }) -LinkType $linkType
+$o = Invoke-CliText -ConfigPath $cfg -CliArgs @("migrate")
+if ($o -match "失败 0") { Ok "正常迁移完成" } else { Bad "正常迁移失败: $($o.Trim())" }
+Copy-Item -Recurse -Force "$dst\A" "$src\A.dirmv-old"
+$o = Invoke-CliText -ConfigPath $cfg -CliArgs @("recover")
+if ($o -match "清理重复 1") { Ok "清理了重复残留" } else { Bad "恢复汇总不符: $($o.Trim())" }
+if (-not (Test-Path "$src\A.dirmv-old")) { Ok "残留已删除" } else { Bad "残留未删除" }
+if ((Get-Content "$src\A\sub\a.txt") -eq "helloA") { Ok "清理后数据仍可读" } else { Bad "清理后数据丢失" }
 
 # ---------------------------------------------------------------------------
 Write-Host "`n================= 安全测试汇总 =================" -ForegroundColor Magenta

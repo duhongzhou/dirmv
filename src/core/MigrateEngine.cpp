@@ -40,6 +40,32 @@ namespace dirmv
         {
             return msg + L"(错误 " + std::to_wstring(e) + L")";
         }
+
+        // 解析 <base>.dirmv-moving[.N] / <base>.dirmv-old[.N]
+        bool SplitTempName(const std::wstring &name, std::wstring &base,
+                           bool &isMoving, std::wstring &index)
+        {
+            auto match = [&](const std::wstring &suf, bool moving) -> bool
+            {
+                size_t p = name.rfind(suf);
+                if (p == std::wstring::npos || p == 0)
+                    return false;
+                std::wstring rest = name.substr(p + suf.size());
+                if (!rest.empty())
+                {
+                    if (rest[0] != L'.' || rest.size() < 2)
+                        return false;
+                    for (size_t i = 1; i < rest.size(); ++i)
+                        if (rest[i] < L'0' || rest[i] > L'9')
+                            return false;
+                }
+                base = name.substr(0, p);
+                index = rest;
+                isMoving = moving;
+                return true;
+            };
+            return match(kMovingSuffix, true) || match(kOldSuffix, false);
+        }
     } // namespace
 
     std::vector<std::wstring> MigrateEngine::ScanPending(const Rule &rule) const
@@ -62,6 +88,167 @@ namespace dirmv
             pending.push_back(name);
         }
         return pending;
+    }
+
+    // ---------------------------------------------------------------------------
+    // 崩溃残留恢复（.dirmv-moving / .dirmv-old）
+    //   原则：任何情况下都不删除唯一副本；不确定就保留并报告。
+    // ---------------------------------------------------------------------------
+    MigrateEngine::RecoverReport MigrateEngine::RecoverRule(const Rule &rule, bool dryRun,
+                                                            std::atomic<bool> *cancel)
+    {
+        RecoverReport rep;
+        rep.dryRun = dryRun;
+        auto names = Path::ListSubDirectories(rule.watchDir);
+
+        auto addItem = [&](const std::wstring &path, int kind, const std::wstring &action)
+        { rep.items.push_back(RecoverItem{path, action, kind}); };
+
+        for (auto &name : names)
+        {
+            if (cancel && cancel->load())
+                break;
+            std::wstring base, index;
+            bool isMoving = false;
+            if (!SplitTempName(name, base, isMoving, index))
+                continue;
+            rep.scanned++;
+
+            std::wstring residual = Path::Combine(rule.watchDir, name);
+            std::wstring src = Path::Combine(rule.watchDir, base);
+            std::wstring dst = Path::Combine(rule.targetDir, base);
+
+            // 白名单目录绝不复活（用户明确要求不要动它）
+            if (cfg_.IsExcluded(base, rule))
+            {
+                rep.kept++;
+                addItem(residual, 4, L"目录在白名单中，保留不动");
+                LOGW(L"[恢复] 残留属于白名单目录，保留: " + residual);
+                continue;
+            }
+
+            bool srcIsLink = Path::IsReparsePoint(src);
+            bool srcExists = Path::DirectoryExists(src); // 跟随链接（悬空链接为 false）
+            bool srcIsRealDir = srcExists && !srcIsLink;
+            bool dstExists = Path::DirectoryExists(dst);
+
+            // 源名已被「指向目标」的链接接手 → 数据完整，残留是重复数据
+            bool linkReady = false;
+            if (srcExists && srcIsLink)
+            {
+                std::wstring t = Path::ReadLinkTarget(src);
+                linkReady = !t.empty() &&
+                            Path::Equals(Path::Normalize(t), Path::Normalize(dst));
+            }
+
+            auto keep = [&](const std::wstring &why)
+            {
+                rep.kept++;
+                addItem(residual, 4, why);
+                LOGW(L"[恢复] 保留残留目录: " + residual + L"（" + why + L"）");
+            };
+
+            auto cleanResidual = [&](const std::wstring &why) -> bool
+            {
+                if (cfg_.lockDetectEnabled)
+                {
+                    auto locks = FileEngine::DetectLocks(residual);
+                    if (!locks.empty())
+                    {
+                        keep(L"仍有 " + std::to_wstring(locks.size()) + L" 个文件被占用");
+                        return false;
+                    }
+                }
+                if (dryRun)
+                {
+                    rep.cleaned++;
+                    addItem(residual, 3, L"将清理（" + why + L"）");
+                    LOGI(L"[恢复] 将清理重复数据: " + residual + L"（" + why + L"）");
+                    return true;
+                }
+                std::wstring err;
+                if (!FileEngine::RemoveTree(residual, &err))
+                {
+                    keep(L"删除失败: " + err);
+                    return false;
+                }
+                rep.cleaned++;
+                addItem(residual, 3, L"已清理（" + why + L"）");
+                LOGI(L"[恢复] 已清理重复数据: " + residual + L"（" + why + L"）");
+                return true;
+            };
+
+            auto restoreName = [&]() -> bool
+            {
+                if (dryRun)
+                {
+                    rep.restored++;
+                    addItem(residual, 2, L"将改回原名（目标无数据，恢复原状）");
+                    LOGI(L"[恢复] 将把 " + residual + L" 改回 " + src);
+                    return true;
+                }
+                if (!MoveFileExW(residual.c_str(), src.c_str(), 0))
+                {
+                    keep(L"改回原名失败" + ErrText(L"", GetLastError()));
+                    return false;
+                }
+                rep.restored++;
+                addItem(residual, 2, L"已改回原名（目标无数据，恢复原状）");
+                LOGI(L"[恢复] 已把 " + residual + L" 改回 " + src);
+                return true;
+            };
+
+            auto relink = [&]() -> bool
+            {
+                // 悬空链接先移除，否则 CreateLink 报 183
+                if (!dryRun && !srcExists && Path::IsReparsePoint(src))
+                    FileEngine::RemoveLink(src, nullptr);
+                if (dryRun)
+                {
+                    rep.relinked++;
+                    addItem(residual, 1, L"将补建链接（目标已有完整数据）");
+                    LOGI(L"[恢复] 将为 " + src + L" 补建指向 " + dst + L" 的链接");
+                    return true;
+                }
+                std::wstring err;
+                if (!FileEngine::CreateLink(src, dst,
+                                            cfg_.linkType == LinkType::Junction, &err))
+                {
+                    keep(L"补建链接失败: " + err);
+                    return false;
+                }
+                rep.relinked++;
+                addItem(residual, 1, L"已补建链接（目标已有完整数据）");
+                LOGI(L"[恢复] 已为 " + src + L" 补建指向 " + dst + L" 的链接");
+                return true;
+            };
+
+            if (linkReady)
+            {
+                cleanResidual(L"链接与目标数据均已就绪，残留为重复数据");
+                continue;
+            }
+            if (!srcExists && !srcIsLink && dstExists)
+            {
+                if (relink() && !dryRun)
+                    cleanResidual(L"补建链接后清理旧数据");
+                continue;
+            }
+            if (!srcExists && !srcIsLink)
+            {
+                restoreName();
+                continue;
+            }
+            if (srcIsRealDir)
+            {
+                // 源目录仍真实存在：上次迁移失败已把数据还原，残留是重复副本。
+                // 但目标里也可能有更早一次迁移的完整副本，保留待人工确认。
+                keep(L"源目录仍然存在，残留为重复副本，保留待人工确认");
+                continue;
+            }
+            keep(L"无法判断安全处理方式，保留待人工确认");
+        }
+        return rep;
     }
 
     // ---------------------------------------------------------------------------
@@ -170,6 +357,26 @@ namespace dirmv
         {
             finish(SubtaskState::Skipped, L"目标已存在，跳过（避免覆盖）");
             return;
+        }
+
+        // 1.5) 目标磁盘剩余空间预检：不足则直接失败，不产生半成品目标
+        {
+            wchar_t volRoot[MAX_PATH]{};
+            if (GetVolumePathNameW(rule.targetDir.c_str(), volRoot, MAX_PATH))
+            {
+                ULARGE_INTEGER avail{};
+                if (GetDiskFreeSpaceExW(volRoot, &avail, nullptr, nullptr))
+                {
+                    constexpr uint64_t kReserve = 64ull * 1024 * 1024; // 64 MB 余量
+                    if (st.totalBytes + kReserve > avail.QuadPart)
+                    {
+                        finish(SubtaskState::Failed,
+                               L"目标磁盘空间不足：需要 " + Path::FormatBytes(st.totalBytes) +
+                                   L"，可用 " + Path::FormatBytes(avail.QuadPart));
+                        return;
+                    }
+                }
+            }
         }
 
         // 2) 迁移前占用检测

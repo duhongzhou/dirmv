@@ -46,6 +46,7 @@ namespace dirmv
         WOut(L"dirMover 命令行用法：\n"
              L"  migrate     执行一次迁移\n"
              L"  restore     从日志恢复\n"
+             L"  recover [--dry-run] [--index N]  修复崩溃残留(.dirmv-moving/.dirmv-old)\n"
              L"  scan        列出待迁移目录\n"
              L"  change-target --index N --newtarget <目录>   更换某规则目标目录\n"
              L"  restore-excluded --index N --name <目录名>   还原（加入白名单前）\n"
@@ -116,9 +117,12 @@ namespace dirmv
         std::wstring cmd;
         int ruleIndex = -1;
         std::wstring newTarget, excludeName, watchDir, importDir, importTarget, importKind;
+        bool dryRun = false;
         for (size_t i = 0; i < args.size(); ++i)
         {
-            if (args[i] == L"--config" && i + 1 < args.size())
+            if (args[i] == L"--dry-run")
+                dryRun = true;
+            else if (args[i] == L"--config" && i + 1 < args.size())
                 configPath = args[++i];
             else if (args[i] == L"--index" && i + 1 < args.size())
                 ruleIndex = _wtoi(args[++i].c_str());
@@ -187,7 +191,7 @@ namespace dirmv
         }
 
         // migrate / import / exclude：不做整份配置校验，交由命令逐条处理可用规则
-        bool perRuleCmd = (cmd == L"migrate" || cmd == L"import" ||
+        bool perRuleCmd = (cmd == L"migrate" || cmd == L"import" || cmd == L"recover" ||
                            cmd == L"exclude" || cmd == L"unexclude");
         if (!perRuleCmd)
         {
@@ -259,6 +263,46 @@ namespace dirmv
                     WOut(L"重试任务: " + err + L"\n");
             }
             return (r.failed || r.locked) ? 2 : 0;
+        }
+        if (cmd == L"recover")
+        {
+            MigrateEngine::RecoverReport sum;
+            int picked = 0;
+            for (size_t i = 0; i < cfg.rules.size(); ++i)
+            {
+                if (!cfg.rules[i].enabled)
+                    continue;
+                if (ruleIndex >= 0 && (int)i != ruleIndex)
+                    continue;
+                picked++;
+                auto r = engine.RecoverRule(cfg.rules[i], dryRun);
+                for (auto &it : r.items)
+                {
+                    const wchar_t *tag = it.kind == 1 ? L"[补链接]"
+                                         : it.kind == 2 ? L"[还原]  "
+                                                        : it.kind == 3 ? L"[清理]  "
+                                                                       : L"[保留]  ";
+                    WOut(std::wstring(L"  ") + tag + L" " + it.path + L"  — " +
+                         it.action + L"\n");
+                }
+                sum.scanned += r.scanned;
+                sum.relinked += r.relinked;
+                sum.restored += r.restored;
+                sum.cleaned += r.cleaned;
+                sum.kept += r.kept;
+            }
+            if (picked == 0)
+            {
+                WOut(L"没有可处理的启用规则\n");
+                return 1;
+            }
+            WOut(std::wstring(dryRun ? L"\n预演（未修改磁盘）：" : L"\n恢复完成：") +
+                 L"扫描残留 " + std::to_wstring(sum.scanned) + L"，补建链接 " +
+                 std::to_wstring(sum.relinked) + L"，还原原名 " +
+                 std::to_wstring(sum.restored) + L"，清理重复 " +
+                 std::to_wstring(sum.cleaned) + L"，保留待查 " +
+                 std::to_wstring(sum.kept) + L"\n");
+            return 0;
         }
         if (cmd == L"restore")
         {

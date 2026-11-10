@@ -26,8 +26,24 @@ namespace dirmv
         sinks_.push_back(std::move(sink));
     }
 
-    static const wchar_t *LevelName(LogLevel lv)
+    // 日志单文件上限：超过后滚动为 <name>.1（覆盖旧备份），避免无限增长
+    static constexpr uint64_t kMaxLogBytes = 5ull * 1024 * 1024;
+
+    static void RotateIfNeeded(const std::wstring &path)
     {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+            return;
+        ULARGE_INTEGER sz;
+        sz.LowPart = fad.nFileSizeLow;
+        sz.HighPart = fad.nFileSizeHigh;
+        if (sz.QuadPart < kMaxLogBytes)
+            return;
+        std::wstring bak = path + L".1";
+        MoveFileExW(path.c_str(), bak.c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+
+    static const wchar_t *LevelName(LogLevel lv)    {
         switch (lv)
         {
         case LogLevel::Trace:
@@ -67,9 +83,10 @@ namespace dirmv
             toConsole = console_;
             sinkCopy = sinks_;
         }
-        // 文件按 UTF-8 追加写（避免 wofstream 在中文上失败）
+        // 文件按 UTF-8 追加写（避免 wofstream 在中文上失败），并做大小轮转
         if (toFile)
         {
+            RotateIfNeeded(path);
             Path::AppendFileUtf8(path, line + L"\r\n");
         }
         // 控制台优先用 WriteConsoleW 输出宽字符，避免代码页乱码

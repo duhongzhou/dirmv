@@ -14,12 +14,14 @@
 | 目录迁移     | 把监视目录下每个非白名单一级子目录迁移到目标目录                                      |
 | 创建链接     | 原位置创建**符号链接**（默认，需管理员）或**目录联接 Junction**（无需管理员）         |
 | 崩溃安全     | 复制→校验→原子改名→建链接→删旧数据；**任何失败都不删除唯一副本**（详见「迁移安全性」） |
+| 崩溃自愈     | 启动/手动 `recover` 自动处理 `.dirmv-moving` / `.dirmv-old` 残留，补建链接或还原原名 |
+| 空间预检     | 迁移前检查目标磁盘剩余空间（预留 64 MB），不足直接失败，不产生半成品目标              |
 | 白名单       | 内置系统目录白名单 + 用户自定义排除列表（每行一个）                                   |
 | 自动迁移     | ① 文件系统实时监视（`ReadDirectoryChangesW`，新目录立即迁移）② 定时扫描（可配置间隔） |
 | 进度与 ETA   | 迁移时显示进度条、已传输字节、速度与**预计完成时间**                                  |
 | 恢复         | 删除链接、把数据移回原位置（依据迁移日志 LINK\|src\|dst）                             |
 | 回滚         | 任何一步失败自动把数据/链接还原到迁移前状态                                           |
-| 多线程       | 前台 / 后台运行均可限制线程数（1–64）                                                 |
+| 多线程       | 前台 / 后台运行均可限制线程数（0=自动，1–64 手动）                                    |
 | Windows 服务 | 注册为系统服务、**开机自动启动**、常驻后台自动/定时迁移                               |
 | 后台控制     | GUI 通过命名管道远程控制后台服务（迁移 / 恢复 / 状态 / 停止 / 重载）                  |
 | 系统托盘     | 关闭窗口最小化到托盘，右键菜单可快速操作                                              |
@@ -62,8 +64,15 @@
   避免「监视触发 → 失败 → 再触发」的循环重试
 - **监视去抖**：5 秒内多次目录变化只触发一次迁移
 - **绝不覆盖**：目标已存在同名目录时一律跳过（无论 `SkipExisting` 取值）
+- **空间预检**：复制前检查目标卷剩余空间（数据量 + 64 MB 余量），不足直接失败，不产生半成品
+- **崩溃自愈**：服务每次启动、或手动执行 `dirMover_cli.exe recover` 时，会扫描
+  `<名字>.dirmv-moving` / `<名字>.dirmv-old` 残留：目标数据已完整则补建链接并清理重复副本；
+  目标无数据则把残留目录改回原名；**判断不了怎么处理的一律保留并报告**（`--dry-run` 可先预演）
 - **残留目录**：若旧数据仍被占用，会保留为 `<名字>.dirmv-old`（可用 `dirMover_cli.exe restore` 或手工处理），
   下次扫描不会把它当成待迁移目录
+- **日志轮转**：日志超过 5 MB 自动滚动为 `<日志>.1`，不会无限增长
+- **管道权限**：控制管道仅允许 SYSTEM / 管理员 / 本机交互式用户，并拒绝远程客户端；
+  低权限进程无法命令 SYSTEM 服务执行迁移/恢复/停止
 
 ---
 
@@ -143,7 +152,7 @@ powershell -ExecutionPolicy Bypass -File test\run_all_tests.ps1
 | **CLI 全功能测试**     | `test\clitest.ps1`   | 用「测试规则文件」通过 `dirMover_cli.exe` 驱动，逐项验证 **19** 个功能点       |
 | **GUI 自动化冒烟测试** | `test\guitest.ps1`   | 启动真实 GUI 窗口，用 `EnumWindows/SendMessage` 驱动，验证界面可用（**9** 项） |
 | **综合功能测试**       | `test\run_tests.ps1` | 原有全流程综合测试（**58** 项）                                                |
-| **迁移安全性测试**     | `test\safety_test.ps1` | 验证「绝不删除唯一副本」：占用不迁移、无残留、真 Junction、白名单命令（**17** 项） |
+| **迁移安全性测试**     | `test\safety_test.ps1` | 验证「绝不删除唯一副本」：占用不迁移、无残留、真 Junction、白名单命令（**32** 项） |
 
 ### 测试规则文件
 
@@ -238,6 +247,7 @@ powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 dirMover_cli.exe scan                                    列出待迁移目录
 dirMover_cli.exe migrate                                 执行一次迁移
 dirMover_cli.exe restore                                 从日志恢复
+dirMover_cli.exe recover [--dry-run] [--index 0]         修复崩溃残留(.dirmv-moving/.dirmv-old)
 dirMover_cli.exe change-target --index 0 --newtarget D:\New   更换某规则目标目录
 dirMover_cli.exe restore-excluded --index 0 --name "Data"     还原目录（加入白名单前）
 dirMover_cli.exe exclude --index 0 --name ".dsh"              加入白名单(若已迁移先自动还原)

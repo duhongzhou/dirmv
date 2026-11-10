@@ -395,6 +395,30 @@ namespace dirmv
                      [this](PipeCommand c, const std::wstring &a)
                      { return HandlePipe(c, a); });
 
+        // 启动自愈：上次迁移中途崩溃/断电会在源目录旁留下 .dirmv-moving /
+        // .dirmv-old。必须在启动监视器之前处理，避免残留目录被当作新目录。
+        {
+            Config recoverCfg;
+            {
+                std::lock_guard<std::mutex> lk(cfgMtx_);
+                recoverCfg = cfg_;
+            }
+            MigrateEngine eng(recoverCfg);
+            for (auto &r : recoverCfg.rules)
+            {
+                if (!r.enabled)
+                    continue;
+                auto rep = eng.RecoverRule(r);
+                if (rep.any())
+                    LOGI(L"[恢复] 规则 [" + r.watchDir + L"] 发现残留 " +
+                         std::to_wstring(rep.scanned) + L" 个：补建链接 " +
+                         std::to_wstring(rep.relinked) + L"，还原原名 " +
+                         std::to_wstring(rep.restored) + L"，清理重复 " +
+                         std::to_wstring(rep.cleaned) + L"，保留待查 " +
+                         std::to_wstring(rep.kept));
+            }
+        }
+
         // 每条「正确可用的启用规则」一个文件系统监视器
         SetupWatchers();
 
