@@ -1,4 +1,5 @@
 #include "gui/MainWindow.h"
+#include "gui/I18n.h"
 #include "gui/ProgressDialog.h"
 #include "gui/TrayIcon.h"
 #include "gui/App.h"
@@ -67,6 +68,7 @@ namespace
         HWND g_hSchedNDays = nullptr;
         HWND g_hThreads = nullptr;
         HWND g_hLinkType = nullptr;
+        HWND g_hLangCombo = nullptr;
         HWND g_hWatcher = nullptr;
         HWND g_hMoveMode = nullptr;
         HWND g_hLockDetect = nullptr;
@@ -102,6 +104,27 @@ namespace
         }
 
         void SetLabelColor(HWND h, COLORREF c); // 定义见下方布局段
+
+        // 消息框统一入口：界面文案跟随当前语言（动态内容原样保留）。
+        int MBox(HWND owner, const std::wstring &text, const wchar_t *caption, UINT flags)
+        {
+            return MessageBoxW(owner, i18n::TranslateText(text).c_str(), i18n::T(caption), flags);
+        }
+        int MBox(HWND owner, const wchar_t *text, const wchar_t *caption, UINT flags)
+        {
+            return MessageBoxW(owner, i18n::T(text), i18n::T(caption), flags);
+        }
+
+        // 记录所有 tooltip（控件 + 中文原文），切换语言时统一刷新。
+        struct TipEntry
+        {
+            HWND ctl;
+            std::wstring text;
+        };
+        std::vector<TipEntry> g_tips;
+        HWND g_hTip = nullptr;
+        void AddTipById(HWND parent, int id, const wchar_t *text);
+        void UpdateAllTips();
 
         // 在父窗口绘制 1px 描边，包住无边框的子控件（输入框/列表框/列表视图）
         void DrawChildFrame(HWND child, HDC dc, HWND parent)
@@ -394,7 +417,7 @@ namespace
                             std::wstring w = Path::Normalize(GetText(c->editWatch));
                             if (t.empty() || w.empty())
                             {
-                                MessageBoxW(hwnd, L"请同时填写目标目录与新监视目录。", L"生成规则",
+                                MBox(hwnd, L"请同时填写目标目录与新监视目录。", L"生成规则",
                                             MB_ICONINFORMATION);
                                 return 0;
                             }
@@ -474,19 +497,19 @@ namespace
         std::wstring RuleStatusText(const Rule &r)
         {
             if (r.pendingDelete)
-                return L"待删除(还原失败)";
+                return i18n::T(L"待删除(还原失败)");
             if (!r.enabled)
-                return L"已停用";
+                return i18n::T(L"已停用");
             if (!g_cfg.ValidateOneRule(r).empty())
-                return L"不可用";
+                return i18n::T(L"不可用");
             int svc = ServiceInstaller::QueryState(L"dirMoverSvc");
             if (svc == 1)
-                return L"已启用 · 运行中";
+                return i18n::T(L"已启用 · 运行中");
             if (svc == 2 || svc == 3)
-                return L"已启用 · 服务切换中";
+                return i18n::T(L"已启用 · 服务切换中");
             if (svc == -2)
-                return L"已启用 · 服务未安装";
-            return L"已启用 · 后台已停止";
+                return i18n::T(L"已启用 · 服务未安装");
+            return i18n::T(L"已启用 · 后台已停止");
         }
 
         // 只刷新「状态」列（服务状态变化时由 WM_TIMER 调用）
@@ -535,7 +558,7 @@ namespace
                 std::wstring st = RuleStatusText(r);
                 ListView_SetItemText(g_hRuleList, (int)i, 4, const_cast<LPWSTR>(st.c_str()));
 
-                ListView_SetItemText(g_hRuleList, (int)i, 5, const_cast<LPWSTR>(L"详情"));
+                ListView_SetItemText(g_hRuleList, (int)i, 5, const_cast<LPWSTR>(i18n::T(L"详情")));
             }
 
             // 恢复选中（按 watchDir 精确匹配；找不到则清空）
@@ -662,6 +685,7 @@ namespace
             WriteScheduleToUI(c.schedule);
             SetDlgItemInt(g_mainWnd, MainWindow::IDC_THREADS, c.workerThreads, FALSE);
             SendMessageW(g_hLinkType, CB_SETCURSEL, (WPARAM)c.linkType, 0);
+
             SendMessageW(g_hWatcher, BM_SETCHECK, c.enableWatcher ? BST_CHECKED : BST_UNCHECKED, 0);
             SendMessageW(g_hMoveMode, BM_SETCHECK, c.moveMode ? BST_CHECKED : BST_UNCHECKED, 0);
             SendMessageW(g_hLockDetect, BM_SETCHECK, c.lockDetectEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -672,36 +696,36 @@ namespace
         void UpdateServiceState()
         {
             int st = ServiceInstaller::QueryState(L"dirMoverSvc");
-            const wchar_t *txt = L"未知";
+            const wchar_t *txt = i18n::T(L"未知");
             COLORREF color = theme::TextSub;
             switch (st)
             {
             case -2:
-                txt = L"未安装";
+                txt = i18n::T(L"未安装");
                 color = theme::TextSub;
                 break;
             case -1:
-                txt = L"无法查询（权限不足）";
+                txt = i18n::T(L"无法查询（权限不足）");
                 color = theme::Warning;
                 break;
             case 0:
-                txt = L"已安装（已停止）";
+                txt = i18n::T(L"已安装（已停止）");
                 color = theme::TextSub;
                 break;
             case 1:
-                txt = L"运行中";
+                txt = i18n::T(L"运行中");
                 color = theme::Success;
                 break;
             case 3:
-                txt = L"已暂停";
+                txt = i18n::T(L"已暂停");
                 color = theme::Warning;
                 break;
             case 2:
-                txt = L"状态切换中";
+                txt = i18n::T(L"状态切换中");
                 color = theme::TextSub;
                 break;
             default:
-                txt = L"未知";
+                txt = i18n::T(L"未知");
                 break;
             }
             g_svcColor = color;
@@ -940,7 +964,7 @@ namespace
                             std::wstring text =
                                 L"删除规则前会先把已迁移的目录还原回原位置。\r\n\r\n" + name +
                                 L"\r\n\r\n确定删除该规则？";
-                            if (MessageBoxW(hwnd, text.c_str(), L"删除规则",
+                            if (MBox(hwnd, text.c_str(), L"删除规则",
                                             MB_YESNO | MB_ICONWARNING) == IDYES)
                             {
                                 cc->del = true;
@@ -958,12 +982,12 @@ namespace
 
                             if (tmp.watchDir.empty())
                             {
-                                MessageBoxW(hwnd, L"请设置监视目录。", L"规则", MB_ICONWARNING);
+                                MBox(hwnd, L"请设置监视目录。", L"规则", MB_ICONWARNING);
                                 return 0;
                             }
                             if (tmp.targetDir.empty())
                             {
-                                if (MessageBoxW(hwnd, L"目标目录为空，是否仍保存？\n（保存后该规则不会执行迁移）",
+                                if (MBox(hwnd, L"目标目录为空，是否仍保存？\n（保存后该规则不会执行迁移）",
                                                 L"规则", MB_YESNO | MB_ICONQUESTION) != IDYES)
                                     return 0;
                             }
@@ -977,7 +1001,7 @@ namespace
                             // 只有界面值与打开时的数据确实不同才提示保存
                             if (cc && RuleDialogModified(hwnd, *cc->rule, cc->isNew))
                             {
-                                int r = MessageBoxW(hwnd, L"有未保存的修改，是否保存？",
+                                int r = MBox(hwnd, L"有未保存的修改，是否保存？",
                                                     L"未保存的修改", MB_YESNOCANCEL | MB_ICONQUESTION);
                                 if (r == IDCANCEL)
                                     return 0;
@@ -1063,7 +1087,7 @@ namespace
                         auto *cc2 = (DlgCtx *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
                         if (cc2 && RuleDialogModified(hwnd, *cc2->rule, cc2->isNew))
                         {
-                            int r = MessageBoxW(hwnd,
+                            int r = MBox(hwnd,
                                                 L"有未保存的修改，是否保存？",
                                                 L"未保存的修改",
                                                 MB_YESNOCANCEL | MB_ICONQUESTION);
@@ -1176,7 +1200,7 @@ namespace
             if (!err.empty())
             {
                 g_cfg.rules.pop_back();
-                MessageBoxW(g_mainWnd, err.c_str(), L"规则无效", MB_ICONWARNING);
+                MBox(g_mainWnd, err.c_str(), L"规则无效", MB_ICONWARNING);
                 return;
             }
 
@@ -1184,7 +1208,7 @@ namespace
             RefreshRuleList();
             AppendLog(L"[规则] 已添加: " + r.watchDir + L" -> " + r.targetDir +
                       L"（白名单 " + std::to_wstring(r.exclude.size()) + L" 项）");
-            MessageBoxW(g_mainWnd, L"规则已添加并启用。点击「开始迁移」执行迁移。",
+            MBox(g_mainWnd, L"规则已添加并启用。点击「开始迁移」执行迁移。",
                         L"添加规则", MB_ICONINFORMATION);
         }
 
@@ -1204,7 +1228,7 @@ namespace
             std::wstring err = ConfigStore::ImportFromDir(dir, rules, kind, tampered, watchMatched);
             if (!err.empty())
             {
-                MessageBoxW(g_mainWnd, err.c_str(), L"导入规则", MB_ICONWARNING);
+                MBox(g_mainWnd, err.c_str(), L"导入规则", MB_ICONWARNING);
                 return;
             }
 
@@ -1279,7 +1303,7 @@ namespace
                 }
                 if (kept.empty())
                 {
-                    MessageBoxW(g_mainWnd,
+                    MBox(g_mainWnd,
                                 (L"完整配置中的规则在本机都不可用，已全部剔除：\r\n\r\n" + dropped)
                                     .c_str(),
                                 L"导入规则", MB_ICONWARNING);
@@ -1318,7 +1342,7 @@ namespace
             else
                 preview += L"将按配置原样导入（已剔除不可用规则）。";
             preview += L"\r\n\r\n是否导入？";
-            if (MessageBoxW(g_mainWnd, preview.c_str(), L"导入规则",
+            if (MBox(g_mainWnd, preview.c_str(), L"导入规则",
                             MB_YESNO | MB_ICONQUESTION) != IDYES)
                 return;
 
@@ -1418,7 +1442,7 @@ namespace
                 done += L"\r\n\r\n因本机不存在而剔除：\r\n" + dropped;
             if (!skipDetail.empty())
                 done += L"\r\n\r\n跳过的规则：\r\n" + skipDetail;
-            MessageBoxW(g_mainWnd, done.c_str(), L"导入规则", MB_ICONINFORMATION);
+            MBox(g_mainWnd, done.c_str(), L"导入规则", MB_ICONINFORMATION);
         }
 
         // 修改选中规则（弹出窗口；监视目录只读，可改目标目录/白名单）
@@ -1428,7 +1452,7 @@ namespace
         {
             if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
             {
-                MessageBoxW(g_mainWnd, L"请先在列表中选择一条规则。", L"修改规则", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"请先在列表中选择一条规则。", L"修改规则", MB_ICONINFORMATION);
                 return;
             }
             Rule r = g_cfg.rules[g_selectedRule];
@@ -1447,7 +1471,7 @@ namespace
 
             if (targetChanged && !before.targetDir.empty() && !r.targetDir.empty())
             {
-                if (MessageBoxW(g_mainWnd,
+                if (MBox(g_mainWnd,
                                 (L"目标目录已更改：\r\n\r\n旧：" + before.targetDir +
                                  L"\r\n新：" + r.targetDir +
                                  L"\r\n\r\n是否把旧目标的数据整体移动到新目标并重建链接？")
@@ -1457,7 +1481,7 @@ namespace
                     MigrateEngine engine(g_cfg);
                     std::wstring err = engine.ChangeTargetDir(before, r.targetDir, nullptr, nullptr);
                     if (!err.empty())
-                        MessageBoxW(g_mainWnd, err.c_str(), L"更换目标目录失败", MB_ICONERROR);
+                        MBox(g_mainWnd, err.c_str(), L"更换目标目录失败", MB_ICONERROR);
                 }
             }
 
@@ -1486,7 +1510,7 @@ namespace
                         log += L"  " + name + L" : " + err + L"\r\n";
                 }
                 if (!log.empty())
-                    MessageBoxW(g_mainWnd, (L"白名单还原异常：\r\n" + log).c_str(),
+                    MBox(g_mainWnd, (L"白名单还原异常：\r\n" + log).c_str(),
                                 L"修改规则", MB_ICONWARNING);
             }
 
@@ -1500,7 +1524,7 @@ namespace
         {
             if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
             {
-                MessageBoxW(g_mainWnd, L"请先在列表中选择一条规则。", L"删除规则", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"请先在列表中选择一条规则。", L"删除规则", MB_ICONINFORMATION);
                 return;
             }
             Rule &r = g_cfg.rules[g_selectedRule];
@@ -1516,7 +1540,7 @@ namespace
                                          r.watchDir + L"\r\n\r\n还原成功后才删除规则；若有失败会标记并保留规则。是否继续？");
 
             if (!alreadyConfirmed &&
-                MessageBoxW(g_mainWnd, prompt.c_str(), L"删除规则",
+                MBox(g_mainWnd, prompt.c_str(), L"删除规则",
                             MB_YESNO | MB_ICONQUESTION) != IDYES)
                 return;
 
@@ -1570,7 +1594,7 @@ namespace
                 RefreshRuleList();
                 AppendLog(L"[规则] 已删除: " + wd +
                           L"（还原 " + std::to_wstring(rep.succeeded) + L" 成功）");
-                MessageBoxW(g_mainWnd,
+                MBox(g_mainWnd,
                             (L"已还原全部目录（成功 " + std::to_wstring(rep.succeeded) +
                              L" 个），规则已删除。")
                                 .c_str(),
@@ -1596,7 +1620,7 @@ namespace
                 detail += L"\r\n处理方式：关闭占用程序后，再次点击「删除」重试还原。";
                 AppendLog(L"[规则] 删除中止：还原失败 " + std::to_wstring(rep.failedDirs.size()) +
                           L" 个，规则标记为待删除");
-                MessageBoxW(g_mainWnd, detail.c_str(), L"删除规则未完成", MB_ICONWARNING);
+                MBox(g_mainWnd, detail.c_str(), L"删除规则未完成", MB_ICONWARNING);
             }
         }
 
@@ -1612,7 +1636,7 @@ namespace
             }
             if (rows.empty())
             {
-                MessageBoxW(g_mainWnd, L"请先勾选或选中要操作的规则。",
+                MBox(g_mainWnd, L"请先勾选或选中要操作的规则。",
                             enable ? L"启用规则" : L"停用规则", MB_ICONINFORMATION);
                 return;
             }
@@ -1656,7 +1680,7 @@ namespace
                 std::wstring m = L"以下规则不可用，未启用（不影响其他规则）：\r\n\r\n";
                 for (auto &s : refused)
                     m += L"  • " + s + L"\r\n";
-                MessageBoxW(g_mainWnd, m.c_str(), L"启用规则", MB_ICONWARNING);
+                MBox(g_mainWnd, m.c_str(), L"启用规则", MB_ICONWARNING);
             }
             else if (enable)
             {
@@ -1679,7 +1703,7 @@ namespace
             }
             if (idxs.empty())
             {
-                MessageBoxW(g_mainWnd, L"没有已启用且设置了目标目录的规则。", L"扫描接管",
+                MBox(g_mainWnd, L"没有已启用且设置了目标目录的规则。", L"扫描接管",
                             MB_ICONINFORMATION);
                 return;
             }
@@ -1708,7 +1732,7 @@ namespace
                        L" 个指向其他目标目录的链接，请确认是否需要处理。\n";
             AppendLog(L"[扫描已有迁移] 新增 " + std::to_wstring(adopted) + L" 个，外部链接 " +
                       std::to_wstring(foreign) + L" 个");
-            MessageBoxW(g_mainWnd, msg.c_str(), L"扫描已有迁移",
+            MBox(g_mainWnd, msg.c_str(), L"扫描已有迁移",
                         foreign == 0 ? MB_ICONINFORMATION : MB_ICONWARNING);
         }
 
@@ -1727,7 +1751,7 @@ namespace
                 return;
             if (!Path::DirectoryExists(target))
             {
-                MessageBoxW(g_mainWnd, (L"目标目录不存在：\r\n" + target).c_str(), L"生成规则",
+                MBox(g_mainWnd, (L"目标目录不存在：\r\n" + target).c_str(), L"生成规则",
                             MB_ICONWARNING);
                 return;
             }
@@ -1766,7 +1790,7 @@ namespace
                 rule.migrated.push_back(s);
             if (rule.migrated.empty())
             {
-                MessageBoxW(g_mainWnd, L"目标目录下没有子文件夹，无法生成规则。", L"生成规则",
+                MBox(g_mainWnd, L"目标目录下没有子文件夹，无法生成规则。", L"生成规则",
                             MB_ICONINFORMATION);
                 return;
             }
@@ -1786,7 +1810,7 @@ namespace
             AppendLog(L"[生成规则] " + watch + L" -> " + target + L"，共 " +
                       std::to_wstring(rule.migrated.size()) + L" 个目录");
 
-            if (MessageBoxW(g_mainWnd,
+            if (MBox(g_mainWnd,
                             (L"将为目标目录中的 " + std::to_wstring(rule.migrated.size()) +
                              L" 个子文件夹在新位置建立链接：\r\n\r\n目标目录：" + target +
                              L"\r\n新监视目录：" + watch +
@@ -1820,12 +1844,12 @@ namespace
             if (!info->second.empty())
             {
                 AppendLog(L"[生成规则] 失败: " + info->second);
-                MessageBoxW(g_mainWnd, info->second.c_str(), L"生成规则失败", MB_ICONERROR);
+                MBox(g_mainWnd, info->second.c_str(), L"生成规则失败", MB_ICONERROR);
             }
             else
             {
                 AppendLog(L"[生成规则] 完成，规则已生成并交给后台服务管理");
-                MessageBoxW(g_mainWnd,
+                MBox(g_mainWnd,
                             L"规则已生成，链接已重建。\r\n之后该目录会由后台服务按计划继续管理。",
                             L"生成规则完成", MB_ICONINFORMATION);
             }
@@ -1838,7 +1862,7 @@ namespace
         {
             if (g_busy.exchange(true))
             {
-                MessageBoxW(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
                 return;
             }
             ReadPlanIntoConfig();
@@ -1855,7 +1879,7 @@ namespace
             }
             if (rules.empty())
             {
-                MessageBoxW(g_mainWnd, L"没有可迁移的已启用规则（请先启用规则并设置监视/目标目录）。",
+                MBox(g_mainWnd, L"没有可迁移的已启用规则（请先启用规则并设置监视/目标目录）。",
                             L"开始迁移", MB_ICONINFORMATION);
                 g_busy = false;
                 return;
@@ -1867,7 +1891,7 @@ namespace
             if (!svcResp.empty())
             {
                 AppendLog(L"[服务] 已通过后台服务触发迁移（全部已启用规则）");
-                MessageBoxW(g_mainWnd, L"已通知后台服务开始迁移全部已启用的规则。", L"dirMover",
+                MBox(g_mainWnd, L"已通知后台服务开始迁移全部已启用的规则。", L"dirMover",
                             MB_ICONINFORMATION);
                 g_busy = false;
                 return;
@@ -1913,7 +1937,7 @@ namespace
         {
             if (g_busy.exchange(true))
             {
-                MessageBoxW(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
                 return;
             }
             std::vector<Rule> rules;
@@ -1925,7 +1949,7 @@ namespace
             }
             if (rules.empty())
             {
-                MessageBoxW(g_mainWnd, L"没有已启用的规则。", L"恢复", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"没有已启用的规则。", L"恢复", MB_ICONINFORMATION);
                 g_busy = false;
                 return;
             }
@@ -1976,7 +2000,7 @@ namespace
             if (g_hProgress)
                 SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
             RefreshRuleList();
-            MessageBoxW(g_mainWnd, buf, L"完成", MB_ICONINFORMATION);
+            MBox(g_mainWnd, buf, L"完成", MB_ICONINFORMATION);
             delete r;
         }
 
@@ -1993,13 +2017,13 @@ namespace
             if (!err.empty())
             {
                 AppendLog(L"[更换目标] 失败: " + err);
-                MessageBoxW(g_mainWnd, err.c_str(), L"更换目标目录失败", MB_ICONERROR);
+                MBox(g_mainWnd, err.c_str(), L"更换目标目录失败", MB_ICONERROR);
             }
             else if (idx >= 0 && idx < (int)g_cfg.rules.size())
             {
                 // 重新选择新目标（此处已在后台完成），更新配置
                 AppendLog(L"[更换目标] 完成");
-                MessageBoxW(g_mainWnd, L"已更换目标目录并重建链接。", L"完成", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"已更换目标目录并重建链接。", L"完成", MB_ICONINFORMATION);
             }
             delete info;
             RefreshRuleList();
@@ -2031,7 +2055,7 @@ namespace
             }
             detail += L"\r\n处理方式：请保存并关闭上述程序，稍后重试；已自动创建一次性重试任务。";
             AppendLog(L"[占用] 子任务 " + n.subtask + L" 被占用，已跳过");
-            MessageBoxW(g_mainWnd, detail.c_str(), L"文件被占用", MB_ICONWARNING);
+            MBox(g_mainWnd, detail.c_str(), L"文件被占用", MB_ICONWARNING);
             if (g_mainWnd)
                 TrayIcon::Notify(g_mainWnd, L"dirMover 文件被占用", n.subtask + L" 迁移被跳过");
         }
@@ -2055,7 +2079,7 @@ namespace
             SetPropW(h, L"dirmv_clr", (HANDLE)(INT_PTR)(c + 1));
         }
 
-        HWND g_hTip = nullptr; // 全局 tooltip：每个操作按钮都有一句话说明
+        // 全局 tooltip：每个操作按钮都有一句话说明
 
         void AddTipById(HWND parent, int id, const wchar_t *text)
         {
@@ -2081,14 +2105,31 @@ namespace
             ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
             ti.hwnd = g_mainWnd;
             ti.uId = (UINT_PTR)ctl;
-            ti.lpszText = (LPWSTR)text;
+            ti.lpszText = (LPWSTR)i18n::T(text);
             SendMessageW(g_hTip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+            g_tips.push_back(TipEntry{ctl, text});
+        }
+
+        void UpdateAllTips()
+        {
+            if (!g_hTip)
+                return;
+            for (const auto &e : g_tips)
+            {
+                TOOLINFOW ti{};
+                ti.cbSize = sizeof(ti);
+                ti.uFlags = TTF_IDISHWND;
+                ti.hwnd = g_mainWnd;
+                ti.uId = (UINT_PTR)e.ctl;
+                ti.lpszText = (LPWSTR)i18n::T(e.text.c_str());
+                SendMessageW(g_hTip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+            }
         }
 
         HWND MakeLabel(HWND parent, const wchar_t *text, int x, int y, int w, int h, HFONT font,
                        COLORREF color)
         {
-            HWND hwnd = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+            HWND hwnd = CreateWindowExW(0, L"STATIC", i18n::T(text), WS_CHILD | WS_VISIBLE | SS_LEFT,
                                         theme::S(x), theme::S(y), theme::S(w), theme::S(h), parent,
                                         nullptr, g_hInst, nullptr);
             theme::ApplyFont(hwnd, font);
@@ -2187,10 +2228,10 @@ namespace
             {
                 int id;
                 int w;
-            } tasks[] = {{MainWindow::IDC_BTN_MIGRATE_RULE, 96},
-                         {MainWindow::IDC_BTN_RESTORE_RULE, 64},
-                         {MainWindow::IDC_BTN_ADOPT, 116},
-                         {MainWindow::IDC_BTN_REBUILD, 160}};
+            } tasks[] = {{MainWindow::IDC_BTN_MIGRATE_RULE, 120},
+                         {MainWindow::IDC_BTN_RESTORE_RULE, 80},
+                         {MainWindow::IDC_BTN_ADOPT, 130},
+                         {MainWindow::IDC_BTN_REBUILD, 200}};
             int x = left;
             for (const auto &a : tasks)
             {
@@ -2257,7 +2298,7 @@ namespace
             {
                 LVCOLUMNW col{};
                 col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-                col.pszText = (LPWSTR)heads[i];
+                col.pszText = (LPWSTR)i18n::T(heads[i]);
                 col.cx = theme::S(kCols[i]);
                 col.fmt = (i == 2 || i == 3) ? LVCFMT_CENTER : LVCFMT_LEFT;
                 ListView_InsertColumn(g_hRuleList, i, &col);
@@ -2276,16 +2317,16 @@ namespace
             PageHeader(parent, L"任务", L"执行迁移、恢复与接管，并查看进度和日志");
 
             theme::CreateButton(parent, MainWindow::IDC_BTN_MIGRATE_RULE, L"开始迁移",
-                                theme::BtnRole::BtnPrimary, theme::S(0), theme::S(0), theme::S(96),
+                                theme::BtnRole::BtnPrimary, theme::S(0), theme::S(0), theme::S(120),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_RESTORE_RULE, L"恢复",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(64),
+                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(80),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_ADOPT, L"扫描接管…",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(116),
+                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(130),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_REBUILD, L"从目标目录生成规则…",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(160),
+                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(200),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_STOP, L"停止",
                                 theme::BtnRole::BtnDanger, theme::S(0), theme::S(0), theme::S(72),
@@ -2353,6 +2394,26 @@ namespace
         std::atomic<bool> g_sizeCancel{false};
         std::vector<SizeEntry> g_sizeWatchData;
         std::vector<SizeEntry> g_sizeTargetData;
+        unsigned long long g_sizeWatchTotal = 0;
+        unsigned long long g_sizeTargetTotal = 0;
+
+        void UpdateSizeSummaryText()
+        {
+            if (!g_hSizeSummary)
+                return;
+            const std::wstring wn = std::to_wstring(g_sizeWatchData.size());
+            const std::wstring tn = std::to_wstring(g_sizeTargetData.size());
+            std::wstring s;
+            if (i18n::IsEnglish())
+                s = L"Watch total " + Path::FormatBytes(g_sizeWatchTotal) + L" (" + wn +
+                    L" items) · Target total " + Path::FormatBytes(g_sizeTargetTotal) + L" (" + tn +
+                    L" items)";
+            else
+                s = L"监视目录合计 " + Path::FormatBytes(g_sizeWatchTotal) + L"（" + wn +
+                    L" 项） · 目标目录合计 " + Path::FormatBytes(g_sizeTargetTotal) + L"（" + tn +
+                    L" 项）";
+            SetWindowTextW(g_hSizeSummary, s.c_str());
+        }
 
         void ScanChildDirs(const std::wstring &dir, std::vector<SizeEntry> &out,
                            unsigned long long &total, std::atomic<bool> &cancel)
@@ -2402,11 +2463,9 @@ namespace
             g_sizeTargetData = std::move(r->target);
             FillSizeList(g_hSizeWatchList, g_sizeWatchData, r->watchTotal);
             FillSizeList(g_hSizeTargetList, g_sizeTargetData, r->targetTotal);
-            std::wstring s = L"监视目录合计 " + Path::FormatBytes(r->watchTotal) + L"（" +
-                             std::to_wstring(g_sizeWatchData.size()) + L" 项） · 目标目录合计 " +
-                             Path::FormatBytes(r->targetTotal) + L"（" +
-                             std::to_wstring(g_sizeTargetData.size()) + L" 项）";
-            SetWindowTextW(g_hSizeSummary, s.c_str());
+            g_sizeWatchTotal = r->watchTotal;
+            g_sizeTargetTotal = r->targetTotal;
+            UpdateSizeSummaryText();
             SetWindowTextW(g_hSizeStatus, L"");
             delete r;
         }
@@ -2540,7 +2599,7 @@ namespace
                 {
                     LVCOLUMNW col{};
                     col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-                    col.pszText = (LPWSTR)heads[i];
+                    col.pszText = (LPWSTR)i18n::T(heads[i]);
                     col.cx = theme::S(kCols[i]);
                     col.fmt = (i == 1 || i == 2) ? LVCFMT_RIGHT : LVCFMT_LEFT;
                     ListView_InsertColumn(lv, i, &col);
@@ -2560,11 +2619,11 @@ namespace
             MakeLabel(parent, L"定时", 40, 112, 200, 22, theme::FontBodyBold(), theme::Text);
             MakeLabel(parent, L"定时间隔", 40, 148, 64, 20, theme::FontBody(), theme::Text);
             g_hSchedPeriod = MakeCombo(parent, MainWindow::IDC_SCHED_PERIOD, 112, 142, 112, 200);
-            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"不定时");
-            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每天");
-            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每周");
-            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每月");
-            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每N天");
+            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"不定时"));
+            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"每天"));
+            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"每周"));
+            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"每月"));
+            SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"每N天"));
             SendMessageW(g_hSchedPeriod, CB_SETCURSEL, 0, 0);
 
             g_hSchedTimeLabel = MakeLabel(parent, L"时刻", 250, 148, 40, 20, theme::FontBody(),
@@ -2576,13 +2635,13 @@ namespace
             g_hSchedWeekLabel = MakeLabel(parent, L"周几", 420, 148, 40, 20, theme::FontBody(),
                                           theme::Text);
             g_hSchedWeekCombo = MakeCombo(parent, MainWindow::IDC_SCHED_WEEK, 462, 142, 88, 200);
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周日");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周一");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周二");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周三");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周四");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周五");
-            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周六");
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周日"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周一"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周二"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周三"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周四"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周五"));
+            SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"周六"));
             SendMessageW(g_hSchedWeekCombo, CB_SETCURSEL, 1, 0);
 
             g_hSchedDomLabel = MakeLabel(parent, L"每月几号", 420, 148, 62, 20, theme::FontBody(),
@@ -2616,24 +2675,31 @@ namespace
             MakeLabel(parent, L"线程数", 40, 134, 52, 20, theme::FontBody(), theme::Text);
             g_hThreads = MakeEdit(parent, MainWindow::IDC_THREADS, L"4", 96, 128, 64, 30);
             MakeLabel(parent, L"链接类型", 196, 134, 64, 20, theme::FontBody(), theme::Text);
-            g_hLinkType = MakeCombo(parent, MainWindow::IDC_LINKTYPE, 264, 128, 200, 120);
-            SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)L"符号链接(需管理员)");
-            SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)L"目录联接(Junction)");
+            g_hLinkType = MakeCombo(parent, MainWindow::IDC_LINKTYPE, 264, 128, 190, 120);
+            SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"符号链接(需管理员)"));
+            SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)i18n::T(L"目录联接(Junction)"));
             SendMessageW(g_hLinkType, CB_SETCURSEL, 0, 0);
 
+            // ── 界面语言 ──
+            MakeLabel(parent, L"界面语言", 470, 134, 84, 20, theme::FontBody(), theme::Text);
+            g_hLangCombo = MakeCombo(parent, MainWindow::IDC_LANG, 558, 128, 130, 120);
+            SendMessageW(g_hLangCombo, CB_ADDSTRING, 0, (LPARAM)L"中文");
+            SendMessageW(g_hLangCombo, CB_ADDSTRING, 0, (LPARAM)L"English");
+            SendMessageW(g_hLangCombo, CB_SETCURSEL, i18n::IsEnglish() ? 1 : 0, 0);
+
             g_hMoveMode = MakeCheck(parent, MainWindow::IDC_MOVEMODE, L"移动模式（迁移后删源）", 40,
-                                    174, 200, 24);
+                                    174, 280, 24);
             SendMessageW(g_hMoveMode, BM_SETCHECK, BST_CHECKED, 0);
-            g_hWatcher = MakeCheck(parent, MainWindow::IDC_WATCHER, L"启用实时监视", 260, 174, 160,
+            g_hWatcher = MakeCheck(parent, MainWindow::IDC_WATCHER, L"启用实时监视", 330, 174, 230,
                                    24);
             SendMessageW(g_hWatcher, BM_SETCHECK, BST_CHECKED, 0);
 
             g_hLockDetect = MakeCheck(parent, MainWindow::IDC_LOCKDETECT, L"检测文件占用", 40, 212,
-                                      150, 24);
+                                      160, 24);
             SendMessageW(g_hLockDetect, BM_SETCHECK, BST_CHECKED, 0);
-            MakeLabel(parent, L"重试间隔（分钟）", 200, 218, 110, 20, theme::FontBody(),
+            MakeLabel(parent, L"重试间隔（分钟）", 210, 218, 160, 20, theme::FontBody(),
                       theme::Text);
-            g_hRetryMin = MakeEdit(parent, MainWindow::IDC_RETRYMIN, L"5", 316, 212, 64, 30);
+            g_hRetryMin = MakeEdit(parent, MainWindow::IDC_RETRYMIN, L"5", 380, 212, 64, 30);
 
             theme::CreateButton(parent, MainWindow::IDC_BTN_SAVE_PLAN, L"保存设置",
                                 theme::BtnRole::BtnPrimary, theme::S(40), theme::S(262), theme::S(104),
@@ -2666,8 +2732,8 @@ namespace
                 x += 104;
             }
 
-            MakeLabel(parent, L"服务日志", 40, 446, 120, 20, theme::FontSmall(), theme::TextMuted);
-            g_hSvcLogPath = MakeLabel(parent, L"", 104, 446, 700, 20, theme::FontSmall(), theme::Text);
+            MakeLabel(parent, L"服务日志", 40, 446, 96, 20, theme::FontSmall(), theme::TextMuted);
+            g_hSvcLogPath = MakeLabel(parent, L"", 144, 446, 660, 20, theme::FontSmall(), theme::Text);
             SetWindowTextW(g_hSvcLogPath,
                            Path::Combine(Path::ExeDir(), L"dirmv_service.log").c_str());
             theme::CreateButton(parent, MainWindow::IDC_BTN_OPENLOG, L"打开日志",
@@ -2707,6 +2773,115 @@ namespace
                 LayoutTaskPage(page);
             else if (page == g_pageHwnd[PAGE_SIZE])
                 LayoutSizePage(page);
+        }
+    } // namespace
+
+    // ==================== 界面语言切换 ====================
+    namespace
+    {
+        // 把父窗口下所有子控件的标题按当前语言重译（无法匹配的文本原样保留）
+        void TranslateChildWindows(HWND parent)
+        {
+            EnumChildWindows(
+                parent,
+                [](HWND c, LPARAM) -> BOOL
+                {
+                    wchar_t buf[2048];
+                    int n = GetWindowTextW(c, buf, 2048);
+                    if (n > 0)
+                    {
+                        std::wstring t(buf);
+                        std::wstring tr = i18n::TranslateText(t);
+                        if (tr == t)
+                        {
+                            // 拼接标签：把已知中文前缀替换成当前语言
+                            static const wchar_t *prefixes[] = {L"dirMover 版本 ", L"配置文件：", L"服务名 "};
+                            for (const wchar_t *pre : prefixes)
+                            {
+                                const size_t plen = wcslen(pre);
+                                if (t.size() >= plen && t.compare(0, plen, pre) == 0)
+                                {
+                                    tr = i18n::T(pre) + t.substr(plen);
+                                    break;
+                                }
+                            }
+                        }
+                        if (tr != t)
+                        {
+                            SetWindowTextW(c, tr.c_str());
+                            InvalidateRect(c, nullptr, TRUE);
+                        }
+                    }
+                    return TRUE;
+                },
+                0);
+        }
+
+        void RebuildComboItems(HWND cb, const wchar_t *const *items, int count)
+        {
+            if (!cb)
+                return;
+            int sel = (int)SendMessageW(cb, CB_GETCURSEL, 0, 0);
+            if (sel < 0)
+                sel = 0;
+            SendMessageW(cb, CB_RESETCONTENT, 0, 0);
+            for (int i = 0; i < count; ++i)
+                SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)i18n::T(items[i]));
+            SendMessageW(cb, CB_SETCURSEL, (WPARAM)sel, 0);
+        }
+
+        void SetRuleListHeaders()
+        {
+            static const wchar_t *heads[6] = {L"监视目录", L"目标目录", L"白名单", L"已迁移", L"状态", L"详情"};
+            for (int i = 0; i < 6; ++i)
+            {
+                LVCOLUMNW col{};
+                col.mask = LVCF_TEXT;
+                col.pszText = (LPWSTR)i18n::T(heads[i]);
+                ListView_SetColumn(g_hRuleList, i, &col);
+            }
+        }
+
+        void SetSizeListHeaders(HWND lv)
+        {
+            static const wchar_t *heads[3] = {L"直接子目录", L"大小", L"占比"};
+            for (int i = 0; i < 3; ++i)
+            {
+                LVCOLUMNW col{};
+                col.mask = LVCF_TEXT;
+                col.pszText = (LPWSTR)i18n::T(heads[i]);
+                ListView_SetColumn(lv, i, &col);
+            }
+        }
+
+        void ApplyLanguageToUi()
+        {
+            // 1) 所有子控件标题
+            TranslateChildWindows(g_mainWnd);
+
+            // 2) 列表列头
+            SetRuleListHeaders();
+            SetSizeListHeaders(g_hSizeWatchList);
+            SetSizeListHeaders(g_hSizeTargetList);
+
+            // 3) 下拉框条目（值不变，只重译显示文本）
+            static const wchar_t *periods[5] = {L"不定时", L"每天", L"每周", L"每月", L"每N天"};
+            static const wchar_t *weeks[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
+            static const wchar_t *links[2] = {L"符号链接(需管理员)", L"目录联接(Junction)"};
+            RebuildComboItems(g_hSchedPeriod, periods, 5);
+            RebuildComboItems(g_hSchedWeekCombo, weeks, 7);
+            RebuildComboItems(g_hLinkType, links, 2);
+            if (g_hLangCombo)
+                SendMessageW(g_hLangCombo, CB_SETCURSEL, i18n::IsEnglish() ? 1 : 0, 0);
+
+            // 4) 动态文本
+            SetWindowTextW(g_mainWnd, i18n::T(L"dirMover - 目录软链接迁移/恢复工具"));
+            UpdateAllTips();
+            RefreshRuleList();
+            UpdateRuleStatuses();
+            UpdateServiceState();
+            UpdateSizeSummaryText();
+            InvalidateRect(g_mainWnd, nullptr, TRUE);
         }
     } // namespace
 
@@ -2907,12 +3082,27 @@ namespace
                 break;
 
             // 计划页
+            case MainWindow::IDC_LANG:
+            {
+                HWND cb = GetDlgItem(g_pageHwnd[PAGE_SETTINGS], MainWindow::IDC_LANG);
+                int sel = cb ? (int)SendMessageW(cb, CB_GETCURSEL, 0, 0) : 0;
+                if (sel < 0)
+                    sel = 0;
+                g_cfg.uiLanguage = (sel == 1) ? L"en" : L"zh";
+                i18n::SetLanguage(g_cfg.uiLanguage);
+                SaveConfig();
+                ApplyLanguageToUi();
+                AppendLog(sel == 1 ? L"[设置] 界面语言已切换为 English"
+                                   : L"[设置] 界面语言已切换为中文");
+                break;
+            }
+
             case MainWindow::IDC_BTN_SAVE_PLAN:
                 ReadPlanIntoConfig();
                 SaveConfig();
                 UpdateNextRunLabel();
                 AppendLog(L"[计划] 设置已保存");
-                MessageBoxW(g_mainWnd, L"计划设置已保存。", L"dirMover", MB_ICONINFORMATION);
+                MBox(g_mainWnd, L"计划设置已保存。", L"dirMover", MB_ICONINFORMATION);
                 break;
 
             // 设置页（服务）
@@ -2920,9 +3110,9 @@ namespace
             {
                 std::wstring err;
                 if (ServiceInstaller::Install(L"dirMoverSvc", L"dirMover 目录迁移服务", &err))
-                    MessageBoxW(g_mainWnd, L"服务安装成功（已设为开机自动启动）", L"dirMover", MB_ICONINFORMATION);
+                    MBox(g_mainWnd, L"服务安装成功（已设为开机自动启动）", L"dirMover", MB_ICONINFORMATION);
                 else
-                    MessageBoxW(g_mainWnd, err.c_str(), L"安装失败", MB_ICONERROR);
+                    MBox(g_mainWnd, err.c_str(), L"安装失败", MB_ICONERROR);
                 UpdateServiceState();
                 break;
             }
@@ -2930,7 +3120,7 @@ namespace
             {
                 std::wstring err;
                 if (!ServiceInstaller::Start(L"dirMoverSvc", &err))
-                    MessageBoxW(g_mainWnd, err.c_str(), L"启动失败", MB_ICONERROR);
+                    MBox(g_mainWnd, err.c_str(), L"启动失败", MB_ICONERROR);
                 UpdateServiceState();
                 break;
             }
@@ -2938,7 +3128,7 @@ namespace
             {
                 std::wstring err;
                 if (!ServiceInstaller::Stop(L"dirMoverSvc", &err))
-                    MessageBoxW(g_mainWnd, err.c_str(), L"停止失败", MB_ICONERROR);
+                    MBox(g_mainWnd, err.c_str(), L"停止失败", MB_ICONERROR);
                 UpdateServiceState();
                 break;
             }
@@ -2946,9 +3136,9 @@ namespace
             {
                 std::wstring err;
                 if (ServiceInstaller::Uninstall(L"dirMoverSvc", &err))
-                    MessageBoxW(g_mainWnd, L"服务已卸载", L"dirMover", MB_ICONINFORMATION);
+                    MBox(g_mainWnd, L"服务已卸载", L"dirMover", MB_ICONINFORMATION);
                 else
-                    MessageBoxW(g_mainWnd, err.c_str(), L"卸载失败", MB_ICONERROR);
+                    MBox(g_mainWnd, err.c_str(), L"卸载失败", MB_ICONERROR);
                 UpdateServiceState();
                 break;
             }
@@ -2959,7 +3149,7 @@ namespace
                 HINSTANCE r = ShellExecuteW(nullptr, L"open", logPath.c_str(), nullptr, nullptr,
                                             SW_SHOWNORMAL);
                 if ((INT_PTR)r <= 32)
-                    MessageBoxW(g_mainWnd, (L"无法打开日志文件：\n" + logPath).c_str(), L"dirMover",
+                    MBox(g_mainWnd, (L"无法打开日志文件：\n" + logPath).c_str(), L"dirMover",
                                 MB_ICONWARNING);
                 break;
             }
@@ -3079,7 +3269,7 @@ namespace
                               DT_LEFT | DT_VCENTER | DT_SINGLELINE, 0);
                 RECT sr{theme::S(25), theme::S(58), theme::S(kSidebarW) - theme::S(12),
                         theme::S(80)};
-                theme::TextIn(dc, sr, L"目录迁移 · 链接管理", theme::FontSmall(), theme::TextMuted,
+                theme::TextIn(dc, sr, i18n::T(L"目录迁移 · 链接管理"), theme::FontSmall(), theme::TextMuted,
                               DT_LEFT | DT_TOP | DT_SINGLELINE, 0);
 
                 // 底部版本号
@@ -3326,12 +3516,13 @@ namespace
         {
             g_cfg.ApplyDefaults();
         }
+        i18n::InitFromConfig(g_cfg.uiLanguage);
 
         const DWORD style = WS_OVERLAPPEDWINDOW | WS_THICKFRAME | WS_MAXIMIZEBOX;
         RECT rc{0, 0, theme::S(1000), theme::S(740)};
         AdjustWindowRectEx(&rc, style, FALSE, 0);
         HWND hwnd = CreateWindowExW(
-            0, L"dirMoverMainWnd", L"dirMover - 目录软链接迁移/恢复工具", style, CW_USEDEFAULT,
+            0, L"dirMoverMainWnd", i18n::T(L"dirMover - 目录软链接迁移/恢复工具"), style, CW_USEDEFAULT,
             CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, hInst,
             nullptr);
         if (!hwnd)

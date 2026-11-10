@@ -73,6 +73,7 @@ namespace dirmv::gui
             IDC_SIZE_LIST_TARGET = 1053,
             IDC_SIZE_SUMMARY = 1054,
             IDC_SIZE_STATUS = 1055,
+            IDC_LANG = 1056, // 界面语言（0=中文 1=English）
 
             IDC_WD_BASE = 1100, // 星期复选框基址（+0..6）
         };
@@ -83,6 +84,7 @@ namespace dirmv::gui
         static constexpr UINT WM_APP_LOG = WM_APP + 3;
         static constexpr UINT WM_APP_LOCK = WM_APP + 4;
         static constexpr UINT WM_APP_SIZE = WM_APP + 5;
+        static constexpr UINT WM_APP_REBUILD_UI = WM_APP + 6;
     };
 
 } // namespace dirmv::gui

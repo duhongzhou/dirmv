@@ -103,6 +103,9 @@ namespace dirmv
         bool logToFile = true;
         int logLevel = 1; // 0 Trace 1 Info 2 Warn 3 Error
 
+        // 界面语言：zh（中文，默认）/ en（English）。仅影响图形界面文案。
+        std::wstring uiLanguage = L"zh";
+
         // 生成默认配置：一条「当前用户目录」规则（不启用、无目标、带默认白名单）
         void ApplyDefaults();
 

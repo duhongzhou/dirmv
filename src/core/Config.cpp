@@ -200,6 +200,8 @@ namespace dirmv
 
         if (workerThreads < 0 || workerThreads > 64)
             return L"线程数必须在 0..64 之间（0 表示自动）";
+        if (uiLanguage != L"zh" && uiLanguage != L"en")
+            return L"界面语言只能是 zh 或 en";
         if (retryDelayMinutes < 0 || retryDelayMinutes > 1440)
             return L"重试延迟必须在 0..1440 分钟之间（0 表示不自动重试）";
 
@@ -371,6 +373,10 @@ namespace dirmv
         sec(L"Log");
         kvi(L"LogToFile", c.logToFile ? 1 : 0);
         kvi(L"LogLevel", c.logLevel);
+        text += L"\r\n";
+
+        sec(L"Ui");
+        kv(L"Language", c.uiLanguage.empty() ? L"zh" : c.uiLanguage);
         return text;
     }
 
@@ -489,6 +495,15 @@ namespace dirmv
                     out.logToFile = StrToInt(val, 1) != 0;
                 else if (key == L"LogLevel")
                     out.logLevel = StrToInt(val, 1);
+            }
+            else if (section == L"Ui")
+            {
+                if (key == L"Language")
+                {
+                    std::wstring lang = Path::ToLower(val);
+                    if (lang == L"en" || lang == L"zh")
+                        out.uiLanguage = lang;
+                }
             }
         }
         flushRule();

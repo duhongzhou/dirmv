@@ -1,4 +1,5 @@
 #include "gui/Theme.h"
+#include "gui/I18n.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -566,7 +567,7 @@ namespace dirmv::gui::theme
     HWND CreateButton(HWND parent, int id, const std::wstring &text, BtnRole role,
                       int x, int y, int w, int h)
     {
-        HWND btn = CreateWindowExW(0, L"DirMvButton", text.c_str(),
+        HWND btn = CreateWindowExW(0, L"DirMvButton", i18n::T(text.c_str()),
                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                                    x, y, w, h, parent, (HMENU)(INT_PTR)id, nullptr,
                                    (LPVOID)(INT_PTR)role);

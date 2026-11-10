@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(dirMover
-    VERSION 1.4.7
+    VERSION 1.4.8
     DESCRIPTION "目录软链接迁移/恢复工具 - 将非白名单目录迁移到目标目录并创建链接"
     LANGUAGES CXX)
 
@@ -68,6 +68,7 @@ add_executable(dirMover WIN32
     src/gui/ProgressDialog.cpp
     src/gui/MainWindow.cpp
     src/gui/Theme.cpp
+    src/gui/I18n.cpp
     src/gui/TrayIcon.cpp
     src/service/ServiceMain.cpp
     src/service/ServiceWorker.cpp
