@@ -10,7 +10,7 @@
 # ---------------------------------------------------------------------------
 param(
     [string]$Config = "Release",
-    [string]$Version = "1.4.3"
+    [string]$Version = "1.4.4"
 )
 
 $ErrorActionPreference = "Stop"

@@ -477,7 +477,6 @@ namespace dirmv::gui
                 {MainWindow::IDC_BTN_EDIT_RULE, hasSel},
                 {MainWindow::IDC_BTN_ENABLE_RULE, hasSel || anyChecked},
                 {MainWindow::IDC_BTN_DISABLE_RULE, hasSel || anyChecked},
-                {MainWindow::IDC_BTN_DELETE_RULE, hasSel},
                 {MainWindow::IDC_BTN_ADOPT, hasSel},
                 {MainWindow::IDC_BTN_REBUILD, hasSel},
             };
@@ -691,7 +690,8 @@ namespace dirmv::gui
         //   双面板白名单：左=非白名单(监视目录下一级子目录/链接)，右=白名单
         //                 点击某一项即移动到另一侧
         // 返回 true=确定；rule 就地修改（含 exclude）
-        bool RuleEditDialog(HWND owner, Rule &rule, bool isNew)
+        // 返回：0=取消，1=已保存，2=请求删除该规则（调用方负责执行删除流程）
+        int RuleEditDialog(HWND owner, Rule &rule, bool isNew)
         {
             struct DlgCtx
             {
@@ -699,8 +699,9 @@ namespace dirmv::gui
                 bool ok;
                 bool isNew;
                 bool dirty; // 是否有未保存修改
+                bool del;   // 是否请求删除
             };
-            DlgCtx ctx{&rule, false, isNew, false};
+            DlgCtx ctx{&rule, false, isNew, false, false};
 
             const int IDC_WATCH = 1;
             const int IDC_TARGET = 2;
@@ -797,6 +798,8 @@ namespace dirmv::gui
 
                         B(IDOK, L"保存", 336, 316, 76, 30, theme::BtnRole::BtnPrimary);
                         B(IDCANCEL, L"取消", 420, 316, 76, 30, theme::BtnRole::BtnDefault);
+                        if (!c->isNew)
+                            B(103, L"删除此规则", 12, 316, 116, 30, theme::BtnRole::BtnDanger);
                         return 0;
                     }
                     case WM_COMMAND:
@@ -804,6 +807,23 @@ namespace dirmv::gui
                         int id = LOWORD(wp);
                         int code = HIWORD(wp);
                         auto *cc = (DlgCtx *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+                        // 「删除此规则」：只负责确认并把请求交回调用方（还原+删除由 DeleteRuleFlow 执行）
+                        if (id == 103 && code == BN_CLICKED)
+                        {
+                            std::wstring name = (cc && cc->rule) ? cc->rule->watchDir : L"";
+                            std::wstring msg =
+                                L"删除规则前会先把已迁移的目录还原回原位置。\r\n\r\n" + name +
+                                L"\r\n\r\n确定删除该规则？";
+                            if (MessageBoxW(hwnd, msg.c_str(), L"删除规则",
+                                            MB_YESNO | MB_ICONWARNING) == IDYES)
+                            {
+                                cc->del = true;
+                                cc->ok = false;
+                                DestroyWindow(hwnd);
+                            }
+                            return 0;
+                        }
 
                         // 先处理「保存 / 取消」——注意 监视/目标 Edit 的 id 分别是 1/2，
                         // 与 IDOK(1)/IDCANCEL(2) 数值相同；用通知码(BN_CLICKED)区分按钮。
@@ -1029,7 +1049,7 @@ namespace dirmv::gui
             }
             EnableWindow(owner, TRUE);
             SetForegroundWindow(owner);
-            return ctx.ok;
+            return ctx.del ? 2 : (ctx.ok ? 1 : 0);
         }
 
         // ---- 规则操作流程 ----
@@ -1041,7 +1061,7 @@ namespace dirmv::gui
             r.exclude = Config::DefaultExclude();
             r.enabled = true;
 
-            if (!RuleEditDialog(g_mainWnd, r, true))
+            if (RuleEditDialog(g_mainWnd, r, true) != 1)
                 return;
 
             g_cfg.rules.push_back(r);
@@ -1296,6 +1316,8 @@ namespace dirmv::gui
         }
 
         // 修改选中规则（弹出窗口；监视目录只读，可改目标目录/白名单）
+        void DeleteRuleFlow(bool alreadyConfirmed);
+
         void EditRuleFlow()
         {
             if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
@@ -1306,7 +1328,13 @@ namespace dirmv::gui
             Rule r = g_cfg.rules[g_selectedRule];
             Rule before = r;
 
-            if (!RuleEditDialog(g_mainWnd, r, false))
+            int dlgResult = RuleEditDialog(g_mainWnd, r, false);
+            if (dlgResult == 2)
+            {
+                DeleteRuleFlow(true);
+                return;
+            }
+            if (dlgResult != 1)
                 return;
 
             bool targetChanged = !Path::Equals(before.targetDir, r.targetDir);
@@ -1362,7 +1390,7 @@ namespace dirmv::gui
             AppendLog(L"[规则] 已更新: " + r.watchDir + L" -> " + r.targetDir);
         }
 
-        void DeleteRuleFlow()
+        void DeleteRuleFlow(bool alreadyConfirmed)
         {
             if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
             {
@@ -1381,7 +1409,8 @@ namespace dirmv::gui
                                       : (L"删除规则前将先还原所有已迁移的目录（搬回源目录、删除链接）。\r\n\r\n" +
                                          r.watchDir + L"\r\n\r\n还原成功后才删除规则；若有失败会标记并保留规则。是否继续？");
 
-            if (MessageBoxW(g_mainWnd, prompt.c_str(), L"删除规则",
+            if (!alreadyConfirmed &&
+                MessageBoxW(g_mainWnd, prompt.c_str(), L"删除规则",
                             MB_YESNO | MB_ICONQUESTION) != IDYES)
                 return;
 
@@ -1964,8 +1993,7 @@ namespace dirmv::gui
                 int w;
             } acts[] = {{MainWindow::IDC_BTN_ENABLE_RULE, 64},
                         {MainWindow::IDC_BTN_DISABLE_RULE, 64},
-                        {MainWindow::IDC_BTN_EDIT_RULE, 64},
-                        {MainWindow::IDC_BTN_DELETE_RULE, 88}};
+                        {MainWindow::IDC_BTN_EDIT_RULE, 64}};
             int x = left + theme::S(60);
             for (const auto &a : acts)
             {
@@ -2065,9 +2093,6 @@ namespace dirmv::gui
             theme::CreateButton(parent, MainWindow::IDC_BTN_EDIT_RULE, L"编辑",
                                 theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(64),
                                 theme::S(30));
-            theme::CreateButton(parent, MainWindow::IDC_BTN_DELETE_RULE, L"删除",
-                                theme::BtnRole::BtnDanger, theme::S(0), theme::S(0), theme::S(88),
-                                theme::S(30));
 
             g_hTaskLabel = MakeLabel(parent, L"任务", 0, 0, 56, 18, theme::FontSmall(),
                                      theme::TextMuted);
@@ -2117,8 +2142,6 @@ namespace dirmv::gui
                        L"对列表中勾选的规则停用自动迁移");
             AddTipById(parent, MainWindow::IDC_BTN_EDIT_RULE,
                        L"编辑选中规则（监视/目标目录与白名单）");
-            AddTipById(parent, MainWindow::IDC_BTN_DELETE_RULE,
-                       L"删除选中规则，并恢复它已迁移的目录");
             AddTipById(parent, MainWindow::IDC_BTN_MIGRATE_RULE,
                        L"迁移选中规则下所有尚未迁移的非白名节目录");
             AddTipById(parent, MainWindow::IDC_BTN_RESTORE_RULE,
@@ -2458,9 +2481,6 @@ namespace dirmv::gui
                 break;
             case MainWindow::IDC_BTN_IMPORT:
                 ImportRuleFlow();
-                break;
-            case MainWindow::IDC_BTN_DELETE_RULE:
-                DeleteRuleFlow();
                 break;
             case MainWindow::IDC_BTN_ENABLE_RULE:
                 SetRulesEnabledFlow(true);

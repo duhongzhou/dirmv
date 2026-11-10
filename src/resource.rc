@@ -16,8 +16,8 @@ IDI_APPICON ICON DIRMV_ICON
 /////////////////////////////////////////////////////////////////////////////
 // 版本信息
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION    1,4,3,0
- PRODUCTVERSION 1,4,3,0
+ FILEVERSION    1,4,4,0
+ PRODUCTVERSION 1,4,4,0
  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
  FILEFLAGS      0x0L
  FILEOS         VOS_NT_WINDOWS32
@@ -30,12 +30,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "dirMover"
             VALUE "FileDescription",  "目录软链接迁移/恢复工具"
-            VALUE "FileVersion",      "1.4.3.0"
+            VALUE "FileVersion",      "1.4.4.0"
             VALUE "InternalName",     "dirMover"
             VALUE "LegalCopyright",   "Copyright (C) 2026"
             VALUE "OriginalFilename", "dirMover.exe"
             VALUE "ProductName",      "dirMover"
-            VALUE "ProductVersion",   "1.4.3.0"
+            VALUE "ProductVersion",   "1.4.4.0"
         END
     END
     BLOCK "VarFileInfo"
