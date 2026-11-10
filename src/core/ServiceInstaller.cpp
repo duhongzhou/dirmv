@@ -213,7 +213,7 @@ namespace dirmv
         if (!svc)
         {
             CloseServiceHandle(scm);
-            return 0;
+            return -2; // 服务不存在（未安装）
         }
         SERVICE_STATUS st{};
         int result = -1;
@@ -224,8 +224,17 @@ namespace dirmv
             case SERVICE_RUNNING:
                 result = 1;
                 break;
+            case SERVICE_PAUSED:
+                result = 3;
+                break;
             case SERVICE_STOPPED:
                 result = 0;
+                break;
+            case SERVICE_START_PENDING:
+            case SERVICE_STOP_PENDING:
+            case SERVICE_CONTINUE_PENDING:
+            case SERVICE_PAUSE_PENDING:
+                result = 2;
                 break;
             default:
                 result = 2;

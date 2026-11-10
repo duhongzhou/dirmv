@@ -13,6 +13,7 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <map>
@@ -27,7 +28,9 @@ namespace dirmv
         ~ServiceWorker();
 
         // 阻塞运行直到 RequestStop
-        void Run();
+        // onStopWait：停止过程中仍有迁移任务在收尾时，每 200ms 回调一次，
+        //             用于向 SCM 上报 STOP_PENDING 检查点，避免超时被强杀。
+        void Run(std::function<void()> onStopWait = nullptr);
 
         void RequestStop();
         void RequestPause();

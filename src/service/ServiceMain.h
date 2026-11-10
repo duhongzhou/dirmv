@@ -23,7 +23,8 @@ namespace dirmv
         static bool Start(const std::wstring &serviceName, std::wstring *error);
         static bool Stop(const std::wstring &serviceName, std::wstring *error);
         static bool IsInstalled(const std::wstring &serviceName);
-        // 0=未安装/停止, 1=运行中, 2=启动中/停止中, -1=未知
+        // 返回：-2=未安装, -1=无法查询(权限/SCM), 0=已停止, 1=运行中,
+        //       2=启动/停止/暂停/恢复进行中, 3=已暂停
         static int QueryState(const std::wstring &serviceName);
 
     private:

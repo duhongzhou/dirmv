@@ -182,9 +182,12 @@ namespace dirmv
             if (cmd == L"status")
             {
                 int st = ServiceInstaller::QueryState(svcName);
-                const wchar_t *t = (st == 1) ? L"运行中" : (st == 0) ? L"已停止"
-                                                       : (st == 2)   ? L"状态切换中"
-                                                                     : L"未知/需管理员权限";
+                const wchar_t *t = (st == 1) ? L"运行中"
+                                   : (st == 3) ? L"已暂停"
+                                   : (st == 0) ? L"已停止"
+                                   : (st == 2) ? L"状态切换中"
+                                   : (st == -2) ? L"未安装"
+                                                : L"未知（需管理员权限？）";
                 WOut(std::wstring(L"服务状态: ") + t + L"\n");
                 return 0;
             }

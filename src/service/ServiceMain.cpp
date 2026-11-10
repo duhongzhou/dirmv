@@ -38,6 +38,7 @@ namespace dirmv
         {
         case SERVICE_CONTROL_STOP:
         case SERVICE_CONTROL_SHUTDOWN:
+            Logger::Instance().Info(L"[控制] SCM 请求停止服务");
             ReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 5000);
             if (g_worker)
                 g_worker->RequestStop();
@@ -45,14 +46,20 @@ namespace dirmv
         case SERVICE_CONTROL_PAUSE:
             if (g_worker)
                 g_worker->RequestPause();
+            Logger::Instance().Info(L"[控制] SCM 请求暂停服务");
             ReportStatus(SERVICE_PAUSED);
             return NO_ERROR;
         case SERVICE_CONTROL_CONTINUE:
             if (g_worker)
                 g_worker->RequestResume();
+            Logger::Instance().Info(L"[控制] SCM 请求恢复服务");
             ReportStatus(SERVICE_RUNNING);
             return NO_ERROR;
         case SERVICE_CONTROL_INTERROGATE:
+            // 按 MSDN 要求：查询时重新上报当前状态（不改变 waitHint/checkpoint），
+            // SCM 才能确认服务仍在响应。
+            if (g_statusHandle)
+                SetServiceStatus(g_statusHandle, &g_status);
             return NO_ERROR;
         default:
             return ERROR_CALL_NOT_IMPLEMENTED;
@@ -82,7 +89,8 @@ namespace dirmv
         g_worker = &worker;
         ReportStatus(SERVICE_RUNNING);
 
-        worker.Run(); // 阻塞直到停止
+        worker.Run([]()
+                    { ReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 10000); }); // 阻塞直到停止
 
         g_worker = nullptr;
         ReportStatus(SERVICE_STOPPED);

@@ -34,11 +34,20 @@ namespace dirmv
 
     void ServiceWorker::RequestStop()
     {
+        LOGI(L"[控制] 收到停止请求，正在中止当前任务并收尾");
         stopped_ = true;
         cancel_ = true;
     }
-    void ServiceWorker::RequestPause() { paused_ = true; }
-    void ServiceWorker::RequestResume() { paused_ = false; }
+    void ServiceWorker::RequestPause()
+    {
+        LOGI(L"[控制] 服务已暂停：不再开始新的迁移，正在进行的子目录会先完成");
+        paused_ = true;
+    }
+    void ServiceWorker::RequestResume()
+    {
+        LOGI(L"[控制] 服务已恢复：重新接受监视/定时触发");
+        paused_ = false;
+    }
 
     // ---------------------------------------------------------------------------
     // 失败冷却
@@ -304,6 +313,7 @@ namespace dirmv
                    std::to_wstring(r.failed) + L"\"}";
         }
         case PipeCommand::Stop:
+            LOGI(L"[控制] 收到管道『停止当前任务』请求");
             cancel_ = true;
             return L"{\"ok\":true,\"msg\":\"已请求停止当前任务\"}";
         case PipeCommand::Reload:
@@ -378,7 +388,7 @@ namespace dirmv
         }
     }
 
-    void ServiceWorker::Run()
+    void ServiceWorker::Run(std::function<void()> onStopWait)
     {
         ReloadConfig();
 
@@ -477,6 +487,15 @@ namespace dirmv
         if (pipe_)
             pipe_->Stop();
         cancel_ = true;
+        // 等待正在进行的迁移安全收尾：取消会在下一个文件/进度回调处生效，
+        // 源数据保持完整。期间每 200ms 上报一次 STOP_PENDING 检查点，
+        // 避免 SCM 因 30 秒内没有进展而强制终止（事件 7034）。
+        while (busy_.load())
+        {
+            if (onStopWait)
+                onStopWait();
+            Sleep(200);
+        }
         if (migrateThread_.joinable())
             migrateThread_.join();
     }

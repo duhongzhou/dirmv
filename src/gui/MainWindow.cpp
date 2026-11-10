@@ -10,6 +10,7 @@
 #include "service/ServiceMain.h"
 
 #include <windows.h>
+#include <winver.h>
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
@@ -511,16 +512,70 @@ namespace dirmv::gui
         void UpdateServiceState()
         {
             int st = ServiceInstaller::QueryState(L"dirMoverSvc");
-            const wchar_t *txt = L"未安装";
-            if (st == 1)
+            const wchar_t *txt = L"未知";
+            switch (st)
+            {
+            case -2:
+                txt = L"未安装";
+                break;
+            case -1:
+                txt = L"无法查询（权限不足）";
+                break;
+            case 0:
+                txt = L"已安装（已停止）";
+                break;
+            case 1:
                 txt = L"运行中";
-            else if (st == 0)
-                txt = L"已安装(停止)";
-            else if (st == 2)
+                break;
+            case 3:
+                txt = L"已暂停";
+                break;
+            case 2:
                 txt = L"状态切换中";
-            else if (st == -1)
-                txt = L"需管理员权限";
+                break;
+            default:
+                txt = L"未知";
+                break;
+            }
             SetWindowTextW(g_hSvcState, txt);
+
+            // 按当前状态启用/禁用按钮，避免对 SCM 发起必然失败的操作
+            HWND page = g_pageHwnd[PAGE_ABOUT];
+            if (!page)
+                return;
+            auto enable = [page](int id, bool on)
+            {
+                HWND h = GetDlgItem(page, id);
+                if (h)
+                    EnableWindow(h, on ? TRUE : FALSE);
+            };
+            enable(MainWindow::IDC_BTN_SVCINSTALL, st == -2);
+            enable(MainWindow::IDC_BTN_SVCSTART, st == 0);
+            enable(MainWindow::IDC_BTN_SVCSTOP, st == 1 || st == 3);
+            enable(MainWindow::IDC_BTN_SVCREMOVE, st == 0 || st == 3);
+        }
+
+        // 读取自身 exe 的版本号（以资源版本信息为准，避免界面里硬编码过期）
+        std::wstring GetAppVersion()
+        {
+            wchar_t path[MAX_PATH]{};
+            if (!GetModuleFileNameW(nullptr, path, MAX_PATH))
+                return L"?";
+            DWORD dummy = 0;
+            DWORD size = GetFileVersionInfoSizeW(path, &dummy);
+            if (!size)
+                return L"?";
+            std::vector<BYTE> buf(size);
+            if (!GetFileVersionInfoW(path, 0, size, buf.data()))
+                return L"?";
+            VS_FIXEDFILEINFO *fi = nullptr;
+            UINT len = 0;
+            if (!VerQueryValueW(buf.data(), L"\\", (void **)&fi, &len) || !fi)
+                return L"?";
+            return std::to_wstring(HIWORD(fi->dwFileVersionMS)) + L"." +
+                   std::to_wstring(LOWORD(fi->dwFileVersionMS)) + L"." +
+                   std::to_wstring(HIWORD(fi->dwFileVersionLS)) + L"." +
+                   std::to_wstring(LOWORD(fi->dwFileVersionLS));
         }
 
         // 保存配置（应用配置目录 + 监视目录 + 目标目录）
@@ -1885,16 +1940,19 @@ namespace dirmv::gui
 
         void BuildAboutPage(HWND parent)
         {
-            HWND t = CreateWindowExW(0, L"STATIC",
-                                     L"dirMover - 目录软链接迁移/恢复工具\r\n"
-                                     L"版本 1.0.0\r\n\r\n"
-                                     L"功能：\r\n"
-                                     L"  · 将监视目录中的非白名单目录迁移到目标目录并创建链接\r\n"
-                                     L"  · 支持符号链接 / 目录联接（Junction）\r\n"
-                                     L"  · 实时监视 + 定时（周期 + 时刻）自动迁移\r\n"
-                                     L"  · 文件占用检测（RestartManager）与一次性重试\r\n"
-                                     L"  · 每规则独立白名单；配置保存于监视/目标/应用三处\r\n\r\n"
-                                     L"后台服务（开机自启动）：\r\n",
+            std::wstring aboutText =
+                L"dirMover - 目录软链接迁移/恢复工具\r\n版本 " + GetAppVersion() +
+                L"\r\n\r\n"
+                L"功能：\r\n"
+                L"  · 将监视目录中的非白名单目录迁移到目标目录并创建链接\r\n"
+                L"  · 支持符号链接 / 目录联接（Junction）\r\n"
+                L"  · 实时监视 + 定时（周期 + 时刻）自动迁移\r\n"
+                L"  · 文件占用检测（RestartManager）与一次性重试\r\n"
+                L"  · 迁移崩溃残留自愈（.dirmv-moving / .dirmv-old）\r\n"
+                L"  · 每规则独立白名单；配置保存于监视/目标/应用三处\r\n\r\n"
+                L"后台服务（开机自启动）：\r\n";
+
+            HWND t = CreateWindowExW(0, L"STATIC", aboutText.c_str(),
                                      WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 12, 720, 220, parent, nullptr, g_hInst, nullptr);
             SetFont(t);
 
@@ -2153,6 +2211,9 @@ namespace dirmv::gui
                                            { PostLog(line); });
                 TrayIcon::Add(hwnd, g_hInst, L"dirMover 目录迁移工具");
                 AppendLog(L"就绪。配置文件（应用目录）: " + g_iniPath);
+                // 每 2 秒刷新一次服务状态（服务可能被 SCM/其他程序在界面外
+                // 启动、停止或暂停，必须让「关于」页跟上状态变化）
+                SetTimer(hwnd, 1, 2000, nullptr);
                 return 0;
             }
             case WM_SIZE:
@@ -2279,6 +2340,14 @@ namespace dirmv::gui
             }
             case TrayIcon::WM_TRAYICON:
                 TrayIcon::HandleMessage(hwnd, wParam, lParam);
+                return 0;
+            case WM_TIMER:
+                if (wParam == 1)
+                {
+                    HWND about = g_pageHwnd[PAGE_ABOUT];
+                    if (about && IsWindowVisible(about))
+                        UpdateServiceState();
+                }
                 return 0;
             case WM_CLOSE:
                 ShowWindow(hwnd, SW_HIDE);
