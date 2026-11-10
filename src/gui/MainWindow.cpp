@@ -15,7 +15,9 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shldisp.h>
 #include <shellapi.h>
+#include <oleauto.h>
 #include <algorithm>
 #include <thread>
 #include <atomic>
@@ -24,11 +26,13 @@
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
-
-#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "oleaut32.lib")
 
 namespace dirmv::gui
 {
+namespace
+{
+} // namespace
 
     namespace
     {
@@ -41,12 +45,9 @@ namespace dirmv::gui
         HWND g_hLog = nullptr;
         HWND g_hProgress = nullptr;
         HWND g_hEta = nullptr;
-        HWND g_hActLabel = nullptr; // 规则页「选中规则」标签
         HWND g_hTaskLabel = nullptr;
         HWND g_hLogLabel = nullptr;
         HWND g_hSvcLogPath = nullptr; // 服务页日志路径
-        std::vector<bool> g_ruleChecked;   // 与 g_cfg.rules 对应
-        HIMAGELIST g_hCheckImgs = nullptr; // 复选框图像列表
         // 分页子窗口（0=规则 1=计划 2=服务 3=关于），提前声明供按钮查找使用
         HWND g_pageHwnd[4] = {nullptr, nullptr, nullptr, nullptr};
 
@@ -85,8 +86,9 @@ namespace dirmv::gui
         int g_selectedRule = -1;
 
         const int PAGE_RULES = 0;
-        const int PAGE_PLAN = 1;
-        const int PAGE_SETTINGS = 2;
+        const int PAGE_TASK = 1;
+        const int PAGE_PLAN = 2;
+        const int PAGE_SETTINGS = 3;
         // 设置页同时承载「运行参数 / 后台服务 / 关于」，保留旧名以兼容引用
         const int PAGE_SERVICE = PAGE_SETTINGS;
         const int PAGE_ABOUT = PAGE_SETTINGS;
@@ -420,7 +422,6 @@ namespace dirmv::gui
                     case WM_CTLCOLORSTATIC:
                     {
                         HDC dc = (HDC)wp;
-                        HWND child = (HWND)lp;
                         SetBkMode(dc, TRANSPARENT);
                         SetTextColor(dc, theme::TextSub);
                         return (LRESULT)theme::CardBrush();
@@ -465,52 +466,8 @@ namespace dirmv::gui
         }
 
         // ---- 规则列表 ----
-        void UpdateRuleButtons(); // 前置声明
         // 复选框图像：0=未选 1=已选
-        void EnsureCheckImages()
-        {
-            if (g_hCheckImgs)
-                return;
-            const int kIcon = theme::S(24);
-            const int kBox = theme::S(15);
-            g_hCheckImgs = ImageList_Create(kIcon, kIcon, ILC_COLOR32 | ILC_MASK, 2, 0);
-            for (int checked = 0; checked < 2; ++checked)
-            {
-                HDC hdc = GetDC(nullptr);
-                HDC mem = CreateCompatibleDC(hdc);
-                HBITMAP bmp = CreateCompatibleBitmap(hdc, kIcon, kIcon);
-                HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-                RECT rc{0, 0, kIcon, kIcon};
-                HBRUSH bg = CreateSolidBrush(theme::Card);
-                FillRect(mem, &rc, bg);
-                DeleteObject(bg);
-
-                int bx = (kIcon - kBox) / 2;
-                int by = (kIcon - kBox) / 2;
-                RECT box{bx, by, bx + kBox, by + kBox};
-                if (checked)
-                {
-                    theme::RoundRectEx(mem, box, theme::S(4), theme::Accent, theme::Accent, 1);
-                    HPEN gp = CreatePen(PS_SOLID, theme::S(2), RGB(255, 255, 255));
-                    HPEN ogp = (HPEN)SelectObject(mem, gp);
-                    MoveToEx(mem, bx + theme::S(3), by + theme::S(8), nullptr);
-                    LineTo(mem, bx + theme::S(6), by + theme::S(11));
-                    LineTo(mem, bx + theme::S(12), by + theme::S(4));
-                    SelectObject(mem, ogp);
-                    DeleteObject(gp);
-                }
-                else
-                {
-                    theme::RoundRectEx(mem, box, theme::S(4), theme::Card, theme::BorderStrong, 1);
-                }
-                SelectObject(mem, old);
-                DeleteDC(mem);
-                ReleaseDC(nullptr, hdc);
-                ImageList_AddMasked(g_hCheckImgs, bmp, RGB(255, 255, 255));
-                DeleteObject(bmp);
-            }
-        }
-
+        
         // 规则状态：不仅显示启用/停用，还反映后台服务是否真的在监视
         std::wstring RuleStatusText(const Rule &r)
         {
@@ -541,7 +498,7 @@ namespace dirmv::gui
             for (int i = 0; i < n; ++i)
             {
                 std::wstring st = RuleStatusText(g_cfg.rules[i]);
-                ListView_SetItemText(g_hRuleList, i, 5, const_cast<LPWSTR>(st.c_str()));
+                ListView_SetItemText(g_hRuleList, i, 4, const_cast<LPWSTR>(st.c_str()));
             }
         }
 
@@ -549,10 +506,6 @@ namespace dirmv::gui
         {
             if (!g_hRuleList)
                 return;
-            // 保留勾选状态（按规则数量对齐）
-            g_ruleChecked.resize(g_cfg.rules.size(), false);
-
-            // 记住当前选中规则的标识（按 watchDir），重建后恢复选中，避免选中丢失
             std::wstring selWatch;
             if (g_selectedRule >= 0 && g_selectedRule < (int)g_cfg.rules.size())
                 selWatch = g_cfg.rules[g_selectedRule].watchDir;
@@ -562,29 +515,25 @@ namespace dirmv::gui
             {
                 const Rule &r = g_cfg.rules[i];
                 LVITEMW it{};
-                it.mask = LVIF_TEXT | LVIF_IMAGE;
+                it.mask = LVIF_TEXT;
                 it.iItem = (int)i;
                 it.iSubItem = 0;
-                it.iImage = g_ruleChecked[i] ? 1 : 0;
-                it.pszText = const_cast<LPWSTR>(L"");
+                it.pszText = const_cast<LPWSTR>(r.watchDir.c_str());
                 SendMessageW(g_hRuleList, LVM_INSERTITEMW, 0, (LPARAM)&it);
 
-                ListView_SetItemText(g_hRuleList, (int)i, 1, const_cast<LPWSTR>(r.watchDir.c_str()));
-
                 std::wstring tgt = r.targetDir.empty() ? L"(未设置)" : r.targetDir;
-                ListView_SetItemText(g_hRuleList, (int)i, 2, const_cast<LPWSTR>(tgt.c_str()));
+                ListView_SetItemText(g_hRuleList, (int)i, 1, const_cast<LPWSTR>(tgt.c_str()));
 
                 std::wstring ex = std::to_wstring(r.exclude.size());
-                ListView_SetItemText(g_hRuleList, (int)i, 3, const_cast<LPWSTR>(ex.c_str()));
+                ListView_SetItemText(g_hRuleList, (int)i, 2, const_cast<LPWSTR>(ex.c_str()));
 
                 std::wstring mv = std::to_wstring(r.migrated.size());
-                ListView_SetItemText(g_hRuleList, (int)i, 4, const_cast<LPWSTR>(mv.c_str()));
+                ListView_SetItemText(g_hRuleList, (int)i, 3, const_cast<LPWSTR>(mv.c_str()));
 
                 std::wstring st = RuleStatusText(r);
-                ListView_SetItemText(g_hRuleList, (int)i, 5, const_cast<LPWSTR>(st.c_str()));
+                ListView_SetItemText(g_hRuleList, (int)i, 4, const_cast<LPWSTR>(st.c_str()));
 
-                // 第 6 列「操作」：显示「编辑」文本（点击该列即编辑本行规则）
-                ListView_SetItemText(g_hRuleList, (int)i, 6, const_cast<LPWSTR>(L"编辑"));
+                ListView_SetItemText(g_hRuleList, (int)i, 5, const_cast<LPWSTR>(L"详情"));
             }
 
             // 恢复选中（按 watchDir 精确匹配；找不到则清空）
@@ -605,68 +554,12 @@ namespace dirmv::gui
                                       LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             }
 
-            UpdateRuleButtons();
         }
 
         // 当前勾选的行索引
-        std::vector<int> CheckedRows()
-        {
-            std::vector<int> rows;
-            for (size_t i = 0; i < g_ruleChecked.size(); ++i)
-                if (g_ruleChecked[i])
-                    rows.push_back((int)i);
-            return rows;
-        }
-
-        bool IsAllChecked()
-        {
-            if (g_cfg.rules.empty())
-                return false;
-            for (bool b : g_ruleChecked)
-                if (!b)
-                    return false;
-            return true;
-        }
-
-        void SetAllChecked(bool checked)
-        {
-            g_ruleChecked.assign(g_cfg.rules.size(), checked);
-            RefreshRuleList();
-        }
-
-        // 根据当前选中规则刷新按钮可用性
-        void UpdateRuleButtons()
-        {
-            bool hasSel = (g_selectedRule >= 0 && g_selectedRule < (int)g_cfg.rules.size());
-            bool canMigrate = false;
-            if (hasSel)
-                canMigrate = g_cfg.ValidateOneRule(g_cfg.rules[g_selectedRule]).empty();
-
-            auto anyChecked = !CheckedRows().empty();
-
-            struct
-            {
-                int id;
-                bool enable;
-            } items[] = {
-                {MainWindow::IDC_BTN_MIGRATE_RULE, canMigrate},
-                {MainWindow::IDC_BTN_RESTORE_RULE, hasSel},
-                {MainWindow::IDC_BTN_EDIT_RULE, hasSel},
-                {MainWindow::IDC_BTN_ENABLE_RULE, hasSel || anyChecked},
-                {MainWindow::IDC_BTN_DISABLE_RULE, hasSel || anyChecked},
-                {MainWindow::IDC_BTN_ADOPT, hasSel},
-                {MainWindow::IDC_BTN_REBUILD, hasSel},
-            };
-            for (auto &it : items)
-            {
-                HWND page = g_pageHwnd[PAGE_RULES];
-                HWND h = page ? GetDlgItem(page, it.id) : nullptr;
-                if (!h)
-                    h = GetDlgItem(g_mainWnd, it.id);
-                if (h)
-                    EnableWindow(h, it.enable ? TRUE : FALSE);
-            }
-        }
+        
+        
+        
 
         // ---- 计划页 <-> 配置 ----
         // 根据所选「定时间隔」显示对应的编辑项（只显示相关的）
@@ -868,6 +761,55 @@ namespace dirmv::gui
         //                 点击某一项即移动到另一侧
         // 返回 true=确定；rule 就地修改（含 exclude）
         // 返回：0=取消，1=已保存，2=请求删除该规则（调用方负责执行删除流程）
+        static Rule ReadRuleFromDialog(HWND dlg, const Rule &base, bool isNew)
+        {
+            Rule out = base;
+            if (isNew)
+                out.watchDir = Path::Normalize(Path::Trim(GetText(GetDlgItem(dlg, 1))));
+            out.targetDir = Path::Normalize(Path::Trim(GetText(GetDlgItem(dlg, 2))));
+            if (HWND cb = GetDlgItem(dlg, 104))
+                out.enabled = (SendMessageW(cb, BM_GETCHECK, 0, 0) == BST_CHECKED);
+
+            out.exclude.clear();
+            HWND lstExcl = GetDlgItem(dlg, 4);
+            int nEx = (int)SendMessageW(lstExcl, LB_GETCOUNT, 0, 0);
+            for (int i = 0; i < nEx; ++i)
+            {
+                int len = (int)SendMessageW(lstExcl, LB_GETTEXTLEN, i, 0);
+                std::wstring s(len, L'\0');
+                SendMessageW(lstExcl, LB_GETTEXT, i, (LPARAM)&s[0]);
+                if (!s.empty())
+                    out.exclude.push_back(s);
+            }
+            return out;
+        }
+
+        // 关闭/取消时比较「界面当前值」与「打开时的数据」，而不是一有输入就视为脏
+        static bool RuleDialogModified(HWND dlg, const Rule &base, bool isNew)
+        {
+            Rule cur = ReadRuleFromDialog(dlg, base, isNew);
+            if (cur.enabled != base.enabled)
+                return true;
+            if (Path::ToLower(Path::Normalize(cur.targetDir)) !=
+                Path::ToLower(Path::Normalize(base.targetDir)))
+                return true;
+            if (isNew && Path::ToLower(Path::Normalize(cur.watchDir)) !=
+                             Path::ToLower(Path::Normalize(base.watchDir)))
+                return true;
+            if (cur.exclude.size() != base.exclude.size())
+                return true;
+            std::vector<std::wstring> a, b;
+            a.reserve(cur.exclude.size());
+            b.reserve(base.exclude.size());
+            for (auto &s : cur.exclude)
+                a.push_back(Path::ToLower(s));
+            for (auto &s : base.exclude)
+                b.push_back(Path::ToLower(s));
+            std::sort(a.begin(), a.end());
+            std::sort(b.begin(), b.end());
+            return a != b;
+        }
+
         int RuleEditDialog(HWND owner, Rule &rule, bool isNew)
         {
             struct DlgCtx
@@ -875,14 +817,10 @@ namespace dirmv::gui
                 Rule *rule;
                 bool ok;
                 bool isNew;
-                bool dirty; // 是否有未保存修改
                 bool del;   // 是否请求删除
             };
-            DlgCtx ctx{&rule, false, isNew, false, false};
+            DlgCtx ctx{&rule, false, isNew, false};
 
-            const int IDC_WATCH = 1;
-            const int IDC_TARGET = 2;
-            const int IDC_LIST_EXCL = 4; // 右：白名单
 
             static const wchar_t *kCls = L"dirMoverRuleEditDlg";
             static bool registered = false;
@@ -997,10 +935,10 @@ namespace dirmv::gui
                         if (id == 103 && code == BN_CLICKED)
                         {
                             std::wstring name = (cc && cc->rule) ? cc->rule->watchDir : L"";
-                            std::wstring msg =
+                            std::wstring text =
                                 L"删除规则前会先把已迁移的目录还原回原位置。\r\n\r\n" + name +
                                 L"\r\n\r\n确定删除该规则？";
-                            if (MessageBoxW(hwnd, msg.c_str(), L"删除规则",
+                            if (MessageBoxW(hwnd, text.c_str(), L"删除规则",
                                             MB_YESNO | MB_ICONWARNING) == IDYES)
                             {
                                 cc->del = true;
@@ -1014,27 +952,7 @@ namespace dirmv::gui
                         // 与 IDOK(1)/IDCANCEL(2) 数值相同；用通知码(BN_CLICKED)区分按钮。
                         if (id == IDOK && code == BN_CLICKED)
                         {
-                            std::wstring w = GetText(GetDlgItem(hwnd, IDC_WATCH));
-                            std::wstring t = GetText(GetDlgItem(hwnd, IDC_TARGET));
-
-                            Rule tmp = *cc->rule;
-                            if (HWND cb = GetDlgItem(hwnd, 104))
-                                tmp.enabled = (SendMessageW(cb, BM_GETCHECK, 0, 0) == BST_CHECKED);
-                            if (cc->isNew)
-                                tmp.watchDir = Path::Normalize(Path::Trim(w));
-                            tmp.targetDir = Path::Normalize(Path::Trim(t));
-
-                            tmp.exclude.clear();
-                            HWND lstExcl = GetDlgItem(hwnd, IDC_LIST_EXCL);
-                            int nEx = (int)SendMessageW(lstExcl, LB_GETCOUNT, 0, 0);
-                            for (int i = 0; i < nEx; ++i)
-                            {
-                                int len = (int)SendMessageW(lstExcl, LB_GETTEXTLEN, i, 0);
-                                std::wstring s(len, L'\0');
-                                SendMessageW(lstExcl, LB_GETTEXT, i, (LPARAM)&s[0]);
-                                if (!s.empty())
-                                    tmp.exclude.push_back(s);
-                            }
+                            Rule tmp = ReadRuleFromDialog(hwnd, *cc->rule, cc->isNew);
 
                             if (tmp.watchDir.empty())
                             {
@@ -1049,13 +967,13 @@ namespace dirmv::gui
                             }
                             *cc->rule = tmp;
                             cc->ok = true;
-                            cc->dirty = false;
                             DestroyWindow(hwnd);
                             return 0;
                         }
                         if (id == IDCANCEL && code == BN_CLICKED)
                         {
-                            if (cc && cc->dirty)
+                            // 只有界面值与打开时的数据确实不同才提示保存
+                            if (cc && RuleDialogModified(hwnd, *cc->rule, cc->isNew))
                             {
                                 int r = MessageBoxW(hwnd, L"有未保存的修改，是否保存？",
                                                     L"未保存的修改", MB_YESNOCANCEL | MB_ICONQUESTION);
@@ -1077,8 +995,6 @@ namespace dirmv::gui
                             if (!p.empty())
                             {
                                 SetWindowTextW(GetDlgItem(hwnd, 1), p.c_str());
-                                if (cc)
-                                    cc->dirty = true;
                                 // 刷新左面板
                                 HWND lstAll = GetDlgItem(hwnd, 3);
                                 HWND lstExcl = GetDlgItem(hwnd, 4);
@@ -1115,15 +1031,11 @@ namespace dirmv::gui
                             if (!p.empty())
                             {
                                 SetWindowTextW(GetDlgItem(hwnd, 2), p.c_str());
-                                if (cc)
-                                    cc->dirty = true;
                             }
                         }
                         else if (id == 1 || id == 2)
                         {
-                            // 文本框编辑
-                            if (code == EN_CHANGE && cc)
-                                cc->dirty = true;
+                            // 文本框编辑：关闭时统一比较，无需逐键标记
                         }
                         else if ((id == 3 || id == 4) && code == LBN_SELCHANGE)
                         {
@@ -1139,8 +1051,6 @@ namespace dirmv::gui
                                 SendMessageW(from, LB_GETTEXT, sel, (LPARAM)&s[0]);
                                 SendMessageW(from, LB_DELETESTRING, sel, 0);
                                 SendMessageW(to, LB_ADDSTRING, 0, (LPARAM)s.c_str());
-                                if (cc)
-                                    cc->dirty = true;
                             }
                         }
                         return 0;
@@ -1149,7 +1059,7 @@ namespace dirmv::gui
                     {
                         // 关闭按钮 / 标题栏 X：等同取消（有修改则提示）
                         auto *cc2 = (DlgCtx *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-                        if (cc2 && cc2->dirty)
+                        if (cc2 && RuleDialogModified(hwnd, *cc2->rule, cc2->isNew))
                         {
                             int r = MessageBoxW(hwnd,
                                                 L"有未保存的修改，是否保存？",
@@ -1692,7 +1602,7 @@ namespace dirmv::gui
         // 启用时对每条规则做可用性校验：不可用的规则不能启用（跳过），但不影响其他规则。
         void SetRulesEnabledFlow(bool enable)
         {
-            std::vector<int> rows = CheckedRows();
+            std::vector<int> rows;
             if (rows.empty())
             {
                 if (g_selectedRule >= 0 && g_selectedRule < (int)g_cfg.rules.size())
@@ -1758,49 +1668,46 @@ namespace dirmv::gui
         //       使本应用能识别并管理它们；同时提醒那些指向非本规则目标目录的链接。
         void AdoptFlow()
         {
-            if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
+            std::vector<int> idxs;
+            for (size_t i = 0; i < g_cfg.rules.size(); ++i)
             {
-                MessageBoxW(g_mainWnd, L"请先选择一条规则。", L"扫描接管", MB_ICONINFORMATION);
-                return;
+                const Rule &r = g_cfg.rules[i];
+                if (r.enabled && !r.pendingDelete && !r.targetDir.empty())
+                    idxs.push_back((int)i);
             }
-            Rule &r = g_cfg.rules[g_selectedRule];
-            if (r.targetDir.empty())
+            if (idxs.empty())
             {
-                MessageBoxW(g_mainWnd, L"该规则尚未设置目标目录。", L"扫描接管", MB_ICONWARNING);
+                MessageBoxW(g_mainWnd, L"没有已启用且设置了目标目录的规则。", L"扫描接管",
+                            MB_ICONINFORMATION);
                 return;
             }
             MigrateEngine engine(g_cfg);
-            AdoptResult ar = engine.AdoptExisting(r);
+            int adopted = 0, foreign = 0, plain = 0;
+            std::wstring detail;
+            for (int i : idxs)
+            {
+                AdoptResult ar = engine.AdoptExisting(g_cfg.rules[i]);
+                adopted += (int)ar.adopted.size();
+                foreign += (int)ar.foreignLinks.size();
+                plain += (int)ar.plainDirs.size();
+                for (auto &n : ar.adopted)
+                    detail += L"  + " + n + L"\n";
+            }
             SaveConfig();
             RefreshRuleList();
 
             std::wstring msg = L"扫描已有迁移 完成：\n\n";
-            msg += L"新增纳入 " + std::to_wstring(ar.adopted.size()) + L" 个已迁移目录：\n";
-            for (auto &n : ar.adopted)
-                msg += L"  + " + n + L"\n";
-            if (ar.adopted.empty())
-                msg += L"  (无)\n";
-            msg += L"\n普通目录 " + std::to_wstring(ar.plainDirs.size()) + L" 个\n";
-
-            if (!ar.foreignLinks.empty())
-            {
-                msg += L"\n[提醒] 以下链接/数据指向的不是本规则的目标目录：\n";
-                int shown = 0;
-                for (auto &f : ar.foreignLinks)
-                {
-                    if (shown++ >= 10)
-                    {
-                        msg += L"  ...\n";
-                        break;
-                    }
-                    msg += L"  ! " + Path::FileName(f.linkPath) + L"  ->  " + f.target + L"\n";
-                }
-                msg += L"请确认这些目录是否需要处理（可能由其他工具或规则创建）。\n";
-            }
-            AppendLog(L"[扫描已有迁移] 新增 " + std::to_wstring(ar.adopted.size()) +
-                      L" 个，外部链接 " + std::to_wstring(ar.foreignLinks.size()) + L" 个");
+            msg += L"新增纳入 " + std::to_wstring(adopted) + L" 个已迁移目录\n";
+            if (!detail.empty())
+                msg += detail;
+            msg += L"\n普通目录 " + std::to_wstring(plain) + L" 个\n";
+            if (foreign > 0)
+                msg += L"\n[提醒] 发现 " + std::to_wstring(foreign) +
+                       L" 个指向其他目标目录的链接，请确认是否需要处理。\n";
+            AppendLog(L"[扫描已有迁移] 新增 " + std::to_wstring(adopted) + L" 个，外部链接 " +
+                      std::to_wstring(foreign) + L" 个");
             MessageBoxW(g_mainWnd, msg.c_str(), L"扫描已有迁移",
-                        ar.foreignLinks.empty() ? MB_ICONINFORMATION : MB_ICONWARNING);
+                        foreign == 0 ? MB_ICONINFORMATION : MB_ICONWARNING);
         }
 
         // ---- 从目标目录生成规则 ----
@@ -1924,90 +1831,125 @@ namespace dirmv::gui
             RefreshRuleList();
         }
         // ---- 迁移 / 恢复 ----
-        void StartMigrateCurrentRule()
+        // 开始迁移：自动对所有已启用且可用的规则执行（无需先选中某条规则）
+        void StartMigrateEnabledRules()
         {
             if (g_busy.exchange(true))
             {
                 MessageBoxW(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
                 return;
             }
-            if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
-            {
-                MessageBoxW(g_mainWnd, L"请先在列表中选择一条要迁移的规则。", L"开始迁移", MB_ICONINFORMATION);
-                g_busy = false;
-                return;
-            }
-
-            // 只校验并迁移「选中的这一条」规则（不因其他规则无效而受阻）
             ReadPlanIntoConfig();
             SaveConfig();
-            Rule rule = g_cfg.rules[g_selectedRule];
 
-            std::wstring err = g_cfg.ValidateOneRule(rule);
-            if (!err.empty())
+            std::vector<Rule> rules;
+            for (const auto &r : g_cfg.rules)
             {
-                MessageBoxW(g_mainWnd,
-                            (L"选中的规则不可用于迁移：\r\n\r\n" + err).c_str(),
-                            L"开始迁移", MB_ICONWARNING);
+                if (!r.enabled || r.pendingDelete)
+                    continue;
+                if (!g_cfg.ValidateOneRule(r).empty())
+                    continue;
+                rules.push_back(r);
+            }
+            if (rules.empty())
+            {
+                MessageBoxW(g_mainWnd, L"没有可迁移的已启用规则（请先启用规则并设置监视/目标目录）。",
+                            L"开始迁移", MB_ICONINFORMATION);
                 g_busy = false;
                 return;
             }
 
-            // 服务在运行则委托后台（只迁移选中的这一条规则，带上其监视目录）
+            // 服务在运行则交给后台服务统一迁移所有已启用规则
             std::wstring svcResp = PipeClient::Send(PipeServer::DefaultPipeName(),
-                                                    PipeCommand::Migrate, rule.watchDir);
+                                                    PipeCommand::Migrate, L"");
             if (!svcResp.empty())
             {
-                AppendLog(L"[服务] 已通过后台服务触发迁移（仅选中规则）: " + rule.watchDir);
-                MessageBoxW(g_mainWnd, L"已通知后台服务开始迁移选中的这条规则。", L"dirMover", MB_ICONINFORMATION);
+                AppendLog(L"[服务] 已通过后台服务触发迁移（全部已启用规则）");
+                MessageBoxW(g_mainWnd, L"已通知后台服务开始迁移全部已启用的规则。", L"dirMover",
+                            MB_ICONINFORMATION);
                 g_busy = false;
                 return;
             }
 
             g_cancel = false;
-            AppendLog(L"[迁移] 开始迁移选中规则: " + rule.watchDir + L" -> " + rule.targetDir);
+            AppendLog(L"[迁移] 开始迁移全部已启用规则，共 " + std::to_wstring(rules.size()) + L" 条");
             HWND dlg = ProgressDialog::Show(g_mainWnd, L"迁移进度", true);
             g_progressDlg = dlg;
-            EnableWindow(GetDlgItem(g_mainWnd, MainWindow::IDC_BTN_MIGRATE_RULE), FALSE);
-            g_worker = std::thread([rule, dlg]()
+            if (HWND b = GetDlgItem(g_pageHwnd[PAGE_TASK], MainWindow::IDC_BTN_MIGRATE_RULE))
+                EnableWindow(b, FALSE);
+            g_worker = std::thread([rules, dlg]()
                                    {
                 MigrateEngine engine(g_cfg);
-                auto result = engine.MigrateRule(rule,
-                    [dlg](const ProgressInfo &pi) { ProgressDialog::Update(dlg, pi); },
-                    &g_cancel,
-                    [](const LockNotice &n)
-                    {
-                        auto *copy = new LockNotice(n);
-                        PostMessageW(g_mainWnd, MainWindow::WM_APP_LOCK, 0, (LPARAM)copy);
-                    });
-                PostMessageW(g_mainWnd, MainWindow::WM_APP_DONE, 0, (LPARAM)new MigrateResult(result)); });
+                MigrateResult total;
+                for (const auto &rule : rules)
+                {
+                    if (g_cancel.load())
+                        break;
+                    auto result = engine.MigrateRule(rule,
+                        [dlg](const ProgressInfo &pi) { ProgressDialog::Update(dlg, pi); },
+                        &g_cancel,
+                        [](const LockNotice &n)
+                        {
+                            auto *copy = new LockNotice(n);
+                            PostMessageW(g_mainWnd, MainWindow::WM_APP_LOCK, 0, (LPARAM)copy);
+                        });
+                    total.total += result.total;
+                    total.migrated += result.migrated;
+                    total.skipped += result.skipped;
+                    total.locked += result.locked;
+                    total.failed += result.failed;
+                    total.bytesMoved += result.bytesMoved;
+                    total.subtasks.insert(total.subtasks.end(), result.subtasks.begin(),
+                                          result.subtasks.end());
+                }
+                PostMessageW(g_mainWnd, MainWindow::WM_APP_DONE, 0, (LPARAM)new MigrateResult(total)); });
             g_worker.detach();
         }
 
-        void StartRestoreCurrentRule()
+        // 恢复：对所有已启用规则把已迁移目录搬回原位置
+        void StartRestoreEnabledRules()
         {
             if (g_busy.exchange(true))
             {
                 MessageBoxW(g_mainWnd, L"当前已有任务在运行", L"dirMover", MB_ICONINFORMATION);
                 return;
             }
-            if (g_selectedRule < 0 || g_selectedRule >= (int)g_cfg.rules.size())
+            std::vector<Rule> rules;
+            for (const auto &r : g_cfg.rules)
             {
-                MessageBoxW(g_mainWnd, L"请先选择一条规则。", L"恢复", MB_ICONINFORMATION);
+                if (!r.enabled || r.pendingDelete)
+                    continue;
+                rules.push_back(r);
+            }
+            if (rules.empty())
+            {
+                MessageBoxW(g_mainWnd, L"没有已启用的规则。", L"恢复", MB_ICONINFORMATION);
                 g_busy = false;
                 return;
             }
-            Rule rule = g_cfg.rules[g_selectedRule];
             g_cancel = false;
+            AppendLog(L"[恢复] 开始恢复全部已启用规则，共 " + std::to_wstring(rules.size()) + L" 条");
             HWND dlg = ProgressDialog::Show(g_mainWnd, L"恢复进度", true);
             g_progressDlg = dlg;
-            g_worker = std::thread([rule, dlg]()
+            g_worker = std::thread([rules, dlg]()
                                    {
                 MigrateEngine engine(g_cfg);
-                auto result = engine.RestoreRule(rule,
-                    [dlg](const ProgressInfo &pi) { ProgressDialog::Update(dlg, pi); },
-                    &g_cancel);
-                PostMessageW(g_mainWnd, MainWindow::WM_APP_DONE, 0, (LPARAM)new MigrateResult(result)); });
+                MigrateResult total;
+                for (const auto &rule : rules)
+                {
+                    if (g_cancel.load())
+                        break;
+                    auto result = engine.RestoreRule(rule,
+                        [dlg](const ProgressInfo &pi) { ProgressDialog::Update(dlg, pi); },
+                        &g_cancel);
+                    total.total += result.total;
+                    total.migrated += result.migrated;
+                    total.skipped += result.skipped;
+                    total.locked += result.locked;
+                    total.failed += result.failed;
+                    total.bytesMoved += result.bytesMoved;
+                }
+                PostMessageW(g_mainWnd, MainWindow::WM_APP_DONE, 0, (LPARAM)new MigrateResult(total)); });
             g_worker.detach();
         }
 
@@ -2019,7 +1961,8 @@ namespace dirmv::gui
                 ProgressDialog::Close(g_progressDlg);
                 g_progressDlg = nullptr;
             }
-            EnableWindow(GetDlgItem(g_mainWnd, MainWindow::IDC_BTN_MIGRATE_RULE), TRUE);
+            if (HWND b = GetDlgItem(g_pageHwnd[PAGE_TASK], MainWindow::IDC_BTN_MIGRATE_RULE))
+                EnableWindow(b, TRUE);
 
             wchar_t buf[512];
             swprintf_s(buf, L"任务完成：处理 %d，成功 %d，跳过 %d，占用 %d，失败 %d，传输 %s",
@@ -2097,8 +2040,8 @@ namespace dirmv::gui
 
         // 布局常量（DIP，实际绘制统一用 theme::S 缩放）
         const int kSidebarW = 208;
-        const int kPageCount = 3;
-        constexpr int kNavIds[kPageCount] = {2001, 2002, 2003};
+        const int kPageCount = 4;
+        constexpr int kNavIds[kPageCount] = {2001, 2002, 2003, 2004};
         const int kNavX = 16;
         const int kNavW = 176;
         const int kNavH = 38;
@@ -2204,14 +2147,8 @@ namespace dirmv::gui
             const int panelW = right - left;
 
             const int bottom = h - theme::S(32);
-            const int logH = theme::S(110);
-            const int logY = bottom - logH;
-            const int logLabelY = logY - theme::S(22);
-            const int progressY = logLabelY - theme::S(26);
-            const int tasksY = progressY - theme::S(42);
-            const int actionsY = tasksY - theme::S(42);
             const int listTop = theme::S(112);
-            int listH = actionsY - theme::S(12) - listTop;
+            int listH = bottom - listTop;
             if (listH < theme::S(96))
                 listH = theme::S(96);
 
@@ -2219,39 +2156,31 @@ namespace dirmv::gui
             SetWindowPos(g_hRuleList, nullptr, left, listTop, listW, listH,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             // 列宽：目录两列自适应，其余固定
-            int rest = listW - theme::S(36) - theme::S(62) - theme::S(62) - theme::S(150) - theme::S(88);
+            int rest = listW - theme::S(62) - theme::S(62) - theme::S(150) - theme::S(88);
             if (rest < theme::S(240))
                 rest = theme::S(240);
-            ListView_SetColumnWidth(g_hRuleList, 0, theme::S(36));
-            ListView_SetColumnWidth(g_hRuleList, 1, rest * 52 / 100);
-            ListView_SetColumnWidth(g_hRuleList, 2, rest - rest * 52 / 100);
+            ListView_SetColumnWidth(g_hRuleList, 0, rest * 52 / 100);
+            ListView_SetColumnWidth(g_hRuleList, 1, rest - rest * 52 / 100);
+            ListView_SetColumnWidth(g_hRuleList, 2, theme::S(62));
             ListView_SetColumnWidth(g_hRuleList, 3, theme::S(62));
-            ListView_SetColumnWidth(g_hRuleList, 4, theme::S(62));
-            ListView_SetColumnWidth(g_hRuleList, 5, theme::S(150));
-            ListView_SetColumnWidth(g_hRuleList, 6, theme::S(88));
+            ListView_SetColumnWidth(g_hRuleList, 4, theme::S(150));
+            ListView_SetColumnWidth(g_hRuleList, 5, theme::S(88));
+        }
 
-            if (g_hActLabel)
-                SetWindowPos(g_hActLabel, nullptr, left, actionsY + theme::S(6), theme::S(56),
-                             theme::S(18), SWP_NOZORDER | SWP_NOACTIVATE);
-            struct RowBtn
-            {
-                int id;
-                int w;
-            } acts[] = {{MainWindow::IDC_BTN_ENABLE_RULE, 64},
-                        {MainWindow::IDC_BTN_DISABLE_RULE, 64},
-                        {MainWindow::IDC_BTN_EDIT_RULE, 64}};
-            int x = left + theme::S(60);
-            for (const auto &a : acts)
-            {
-                if (HWND b = GetDlgItem(page, a.id))
-                    SetWindowPos(b, nullptr, x, actionsY, theme::S(a.w), theme::S(30),
-                                 SWP_NOZORDER | SWP_NOACTIVATE);
-                x += theme::S(a.w) + theme::S(8);
-            }
+        // 任务页：迁移/恢复等操作、进度与日志集中在这里
+        void LayoutTaskPage(HWND page)
+        {
+            if (!page)
+                return;
+            RECT rc{};
+            GetClientRect(page, &rc);
+            const int w = rc.right, h = rc.bottom;
+            const int left = theme::S(40);
+            const int right = w - theme::S(40);
+            const int panelW = right - left;
+            const int bottom = h - theme::S(32);
 
-            if (g_hTaskLabel)
-                SetWindowPos(g_hTaskLabel, nullptr, left, tasksY + theme::S(6), theme::S(56),
-                             theme::S(18), SWP_NOZORDER | SWP_NOACTIVATE);
+            const int opsY = theme::S(136);
             struct TaskBtn
             {
                 int id;
@@ -2260,18 +2189,19 @@ namespace dirmv::gui
                          {MainWindow::IDC_BTN_RESTORE_RULE, 64},
                          {MainWindow::IDC_BTN_ADOPT, 116},
                          {MainWindow::IDC_BTN_REBUILD, 160}};
-            x = left + theme::S(60);
+            int x = left;
             for (const auto &a : tasks)
             {
                 if (HWND b = GetDlgItem(page, a.id))
-                    SetWindowPos(b, nullptr, x, tasksY, theme::S(a.w), theme::S(30),
+                    SetWindowPos(b, nullptr, x, opsY, theme::S(a.w), theme::S(30),
                                  SWP_NOZORDER | SWP_NOACTIVATE);
                 x += theme::S(a.w) + theme::S(8);
             }
             if (HWND stop = GetDlgItem(page, MainWindow::IDC_BTN_STOP))
-                SetWindowPos(stop, nullptr, right - theme::S(72), tasksY, theme::S(72), theme::S(30),
+                SetWindowPos(stop, nullptr, right - theme::S(72), opsY, theme::S(72), theme::S(30),
                              SWP_NOZORDER | SWP_NOACTIVATE);
 
+            const int progressY = opsY + theme::S(54);
             const int etaW = theme::S(176);
             if (g_hProgress)
                 SetWindowPos(g_hProgress, nullptr, left, progressY, panelW - etaW - theme::S(12),
@@ -2280,16 +2210,17 @@ namespace dirmv::gui
                 SetWindowPos(g_hEta, nullptr, right - etaW, progressY - theme::S(7), etaW,
                              theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
 
+            const int logLabelY = progressY + theme::S(28);
             if (g_hLogLabel)
                 SetWindowPos(g_hLogLabel, nullptr, left, logLabelY, theme::S(120), theme::S(18),
                              SWP_NOZORDER | SWP_NOACTIVATE);
-            if (g_hLog)
+            const int logY = logLabelY + theme::S(24);
+            const int logH = bottom - logY;
+            if (g_hLog && logH > theme::S(60))
                 SetWindowPos(g_hLog, nullptr, left, logY, panelW, logH,
                              SWP_NOZORDER | SWP_NOACTIVATE);
-            if (HWND b = GetDlgItem(page, 1047))
-                SetWindowPos(b, nullptr, right - theme::S(96), logLabelY - theme::S(3),
-                             theme::S(96), theme::S(24), SWP_NOZORDER | SWP_NOACTIVATE);
         }
+
 
         void BuildRulePage(HWND parent)
         {
@@ -2314,37 +2245,34 @@ namespace dirmv::gui
                                           g_hInst, nullptr);
             ListView_SetExtendedListViewStyle(g_hRuleList,
                                               LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            ListView_SetImageList(g_hRuleList, g_hCheckImgs, LVSIL_SMALL);
             theme::ApplyFont(g_hRuleList, theme::FontBody());
             if (HWND hdr = ListView_GetHeader(g_hRuleList))
                 theme::ApplyFont(hdr, theme::FontSmall());
 
-            const wchar_t *heads[7] = {L"", L"监视目录", L"目标目录", L"白名单", L"已迁移", L"状态", L"操作"};
-            const int kCols[7] = {36, 248, 220, 62, 62, 150, 88};
-            for (int i = 0; i < 7; ++i)
+            const wchar_t *heads[6] = {L"监视目录", L"目标目录", L"白名单", L"已迁移", L"状态", L"详情"};
+            const int kCols[6] = {248, 220, 62, 62, 150, 88};
+            for (int i = 0; i < 6; ++i)
             {
                 LVCOLUMNW col{};
                 col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
                 col.pszText = (LPWSTR)heads[i];
                 col.cx = theme::S(kCols[i]);
-                col.fmt = (i == 0 || i == 3 || i == 4) ? LVCFMT_CENTER : LVCFMT_LEFT;
+                col.fmt = (i == 2 || i == 3) ? LVCFMT_CENTER : LVCFMT_LEFT;
                 ListView_InsertColumn(g_hRuleList, i, &col);
             }
 
-            g_hActLabel = MakeLabel(parent, L"选中规则", 0, 0, 56, 18, theme::FontSmall(),
-                                    theme::TextMuted);
-            theme::CreateButton(parent, MainWindow::IDC_BTN_ENABLE_RULE, L"启用",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(64),
-                                theme::S(30));
-            theme::CreateButton(parent, MainWindow::IDC_BTN_DISABLE_RULE, L"停用",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(64),
-                                theme::S(30));
-            theme::CreateButton(parent, MainWindow::IDC_BTN_EDIT_RULE, L"编辑",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(64),
-                                theme::S(30));
 
-            g_hTaskLabel = MakeLabel(parent, L"任务", 0, 0, 56, 18, theme::FontSmall(),
-                                     theme::TextMuted);
+            AddTipById(parent, MainWindow::IDC_BTN_ADD_RULE, L"新建一条迁移规则");
+            AddTipById(parent, MainWindow::IDC_BTN_IMPORT, L"从其他目录的配置文件导入规则");
+
+            LayoutRulePage(parent);
+        }
+
+        // 任务页：迁移/恢复/接管/生成规则、进度与日志
+        void BuildTaskPage(HWND parent)
+        {
+            PageHeader(parent, L"任务", L"执行迁移、恢复与接管，并查看进度和日志");
+
             theme::CreateButton(parent, MainWindow::IDC_BTN_MIGRATE_RULE, L"开始迁移",
                                 theme::BtnRole::BtnPrimary, theme::S(0), theme::S(0), theme::S(96),
                                 theme::S(30));
@@ -2355,7 +2283,7 @@ namespace dirmv::gui
                                 theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(116),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_REBUILD, L"从目标目录生成规则…",
-                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(108),
+                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(0), theme::S(160),
                                 theme::S(30));
             theme::CreateButton(parent, MainWindow::IDC_BTN_STOP, L"停止",
                                 theme::BtnRole::BtnDanger, theme::S(0), theme::S(0), theme::S(72),
@@ -2378,32 +2306,23 @@ namespace dirmv::gui
                                     theme::TextMuted);
             g_hLog = CreateWindowExW(0, L"EDIT", L"",
                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
-                                         ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
+                                         ES_READONLY | ES_AUTOVSCROLL,
                                      theme::S(0), theme::S(0), theme::S(300), theme::S(78), parent,
                                      (HMENU)(INT_PTR)MainWindow::IDC_LOG, g_hInst, nullptr);
             theme::ApplyFont(g_hLog, theme::FontMono());
-            theme::CreateButton(parent, 1047, L"弹出日志…", theme::BtnRole::BtnGhost,
-                                theme::S(0), theme::S(0), theme::S(96), theme::S(24));
 
-            AddTipById(parent, MainWindow::IDC_BTN_ADD_RULE, L"新建一条迁移规则");
-            AddTipById(parent, MainWindow::IDC_BTN_IMPORT, L"从其他目录的配置文件导入规则");
-            AddTipById(parent, MainWindow::IDC_BTN_ENABLE_RULE,
-                       L"对列表中勾选的规则启用自动迁移");
-            AddTipById(parent, MainWindow::IDC_BTN_DISABLE_RULE,
-                       L"对列表中勾选的规则停用自动迁移");
-            AddTipById(parent, MainWindow::IDC_BTN_EDIT_RULE,
-                       L"编辑选中规则（监视/目标目录与白名单）");
+
             AddTipById(parent, MainWindow::IDC_BTN_MIGRATE_RULE,
-                       L"迁移选中规则下所有尚未迁移的非白名节目录");
+                       L"迁移全部已启用规则下尚未迁移的非白名节目录（无需选中规则）");
             AddTipById(parent, MainWindow::IDC_BTN_RESTORE_RULE,
-                       L"把选中规则已迁移的目录恢复回原位置");
+                       L"把全部已启用规则已迁移的目录恢复回原位置");
             AddTipById(parent, MainWindow::IDC_BTN_ADOPT,
-                       L"目标目录中已有数据、原位置缺少链接时，接管并补建链接");
+                       L"扫描全部已启用规则的目标目录，接管已有数据并补建链接");
             AddTipById(parent, MainWindow::IDC_BTN_REBUILD,
                        L"选择已有数据的目标目录与新监视目录，建立链接并把该目录纳入规则");
             AddTipById(parent, MainWindow::IDC_BTN_STOP, L"停止当前正在执行的迁移/恢复任务");
 
-            LayoutRulePage(parent);
+            LayoutTaskPage(parent);
         }
 
         void BuildPlanPage(HWND parent)
@@ -2556,6 +2475,8 @@ namespace dirmv::gui
                 return;
             if (page == g_pageHwnd[PAGE_RULES])
                 LayoutRulePage(page);
+            else if (page == g_pageHwnd[PAGE_TASK])
+                LayoutTaskPage(page);
             InvalidateRect(page, nullptr, TRUE);
         }
     } // namespace
@@ -2579,6 +2500,8 @@ namespace dirmv::gui
             case WM_SIZE:
                 if (hwnd == g_pageHwnd[PAGE_RULES])
                     LayoutRulePage(hwnd);
+                else if (hwnd == g_pageHwnd[PAGE_TASK])
+                    LayoutTaskPage(hwnd);
                 InvalidateRect(hwnd, nullptr, TRUE);
                 return 0;
             case WM_PAINT:
@@ -2593,6 +2516,17 @@ namespace dirmv::gui
                 RECT card{theme::S(16), theme::S(16), rc.right - theme::S(16),
                           rc.bottom - theme::S(16)};
                 theme::RoundRectEx(dc, card, theme::S(12), theme::Card, theme::Border, 1);
+                if (hwnd == g_pageHwnd[PAGE_SETTINGS])
+                {
+                    const int px = theme::S(24);
+                    const int pw = rc.right - theme::S(24);
+                    const RECT g1{px, theme::S(84), pw, theme::S(306)};
+                    const RECT g2{px, theme::S(310), pw, theme::S(510)};
+                    const RECT g3{px, theme::S(514), pw, rc.bottom - theme::S(24)};
+                    theme::RoundRectEx(dc, g1, theme::S(10), theme::Card, theme::Border, 1);
+                    theme::RoundRectEx(dc, g2, theme::S(10), theme::Card, theme::Border, 1);
+                    theme::RoundRectEx(dc, g3, theme::S(10), theme::Card, theme::Border, 1);
+                }
                 FramePageFields(hwnd, dc);
                 EndPaint(hwnd, &ps);
                 return 0;
@@ -2609,7 +2543,13 @@ namespace dirmv::gui
                 else if (GetDlgCtrlID(ctl) == MainWindow::IDC_SVCSTATE)
                     color = g_svcColor;
                 SetTextColor(dc, color);
-                return (LRESULT)theme::CardBrush();
+                // 复选框由 comctl32 v6 通过 WM_CTLCOLORSTATIC 取背景色，需要白刷；
+                // 普通静态文字返回空刷子，让面板/卡片底色透出
+                wchar_t cls[16]{};
+                GetClassNameW(ctl, cls, 16);
+                if (lstrcmpiW(cls, L"Button") == 0)
+                    return (LRESULT)theme::CardBrush();
+                return (LRESULT)GetStockObject(HOLLOW_BRUSH);
             }
             case WM_CTLCOLOREDIT:
             {
@@ -2680,91 +2620,6 @@ namespace dirmv::gui
     // ==================== 命令处理 ====================
     namespace
     {
-        // 弹出日志窗口：把当前日志内容显示在可滚动的大窗口里
-        void LogPopupFlow()
-        {
-            static const wchar_t *kCls = L"dirMoverLogDlg";
-            static bool registered = false;
-            struct LgCtx
-            {
-                std::wstring text;
-            } ctx;
-            if (g_hLog)
-            {
-                int len = GetWindowTextLengthW(g_hLog);
-                std::wstring t(len, L'\0');
-                if (len > 0)
-                    GetWindowTextW(g_hLog, &t[0], len + 1);
-                ctx.text = t;
-            }
-            if (!registered)
-            {
-                WNDCLASSEXW wc{};
-                wc.cbSize = sizeof(wc);
-                wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT
-                {
-                    switch (msg)
-                    {
-                    case WM_CREATE:
-                    {
-                        auto *c = (LgCtx *)((CREATESTRUCTW *)lp)->lpCreateParams;
-                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
-                        HWND e = CreateWindowExW(0, L"EDIT", c->text.c_str(),
-                                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-                                                     WS_HSCROLL | ES_MULTILINE | ES_READONLY |
-                                                     ES_AUTOVSCROLL | ES_AUTOHSCROLL,
-                                                 theme::S(16), theme::S(16), theme::S(748),
-                                                 theme::S(480), hwnd, (HMENU)1, g_hInst, nullptr);
-                        theme::ApplyFont(e, theme::FontMono());
-                        return 0;
-                    }
-                    case WM_CTLCOLOREDIT:
-                    {
-                        HDC dc = (HDC)wp;
-                        SetBkColor(dc, theme::Card);
-                        SetTextColor(dc, theme::Text);
-                        return (LRESULT)theme::CardBrush();
-                    }
-                    case WM_ERASEBKGND:
-                        return 1;
-                    case WM_PAINT:
-                    {
-                        PAINTSTRUCT ps;
-                        HDC dc = BeginPaint(hwnd, &ps);
-                        RECT rc;
-                        GetClientRect(hwnd, &rc);
-                        HBRUSH bg = CreateSolidBrush(theme::Card);
-                        FillRect(dc, &rc, bg);
-                        DeleteObject(bg);
-                        EndPaint(hwnd, &ps);
-                        return 0;
-                    }
-                    case WM_CLOSE:
-                        DestroyWindow(hwnd);
-                        return 0;
-                    }
-                    return DefWindowProcW(hwnd, msg, wp, lp);
-                };
-                wc.hInstance = g_hInst;
-                wc.lpszClassName = kCls;
-                wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-                wc.hbrBackground = nullptr;
-                RegisterClassExW(&wc);
-                registered = true;
-            }
-            HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, kCls, L"迁移日志",
-                                       WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                                       theme::S(120), theme::S(80), theme::S(780), theme::S(560),
-                                       g_mainWnd, nullptr, g_hInst, &ctx);
-            if (!dlg)
-                return;
-            EnableWindow(g_mainWnd, FALSE);
-            MSG msg{};
-            while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0)
-                DispatchMessageW(&msg);
-            EnableWindow(g_mainWnd, TRUE);
-        }
-
         void OnCommand(int id)
         {
             switch (id)
@@ -2774,9 +2629,12 @@ namespace dirmv::gui
                 ShowPage(PAGE_RULES);
                 break;
             case kNavIds[1]:
-                ShowPage(PAGE_PLAN);
+                ShowPage(PAGE_TASK);
                 break;
             case kNavIds[2]:
+                ShowPage(PAGE_PLAN);
+                break;
+            case kNavIds[3]:
                 ShowPage(PAGE_SETTINGS);
                 break;
 
@@ -2803,17 +2661,14 @@ namespace dirmv::gui
                 GenerateRuleFlow();
                 break;
             case MainWindow::IDC_BTN_MIGRATE_RULE:
-                StartMigrateCurrentRule();
+                StartMigrateEnabledRules();
                 break;
             case MainWindow::IDC_BTN_RESTORE_RULE:
-                StartRestoreCurrentRule();
+                StartRestoreEnabledRules();
                 break;
             case MainWindow::IDC_BTN_STOP:
                 g_cancel = true;
                 AppendLog(L"[用户] 请求停止任务");
-                break;
-            case 1047:
-                LogPopupFlow();
                 break;
 
             // 计划页
@@ -2825,7 +2680,7 @@ namespace dirmv::gui
                 MessageBoxW(g_mainWnd, L"计划设置已保存。", L"dirMover", MB_ICONINFORMATION);
                 break;
 
-            // 关于页（服务）
+            // 设置页（服务）
             case MainWindow::IDC_BTN_SVCINSTALL:
             {
                 std::wstring err;
@@ -2879,10 +2734,10 @@ namespace dirmv::gui
                 SetForegroundWindow(g_mainWnd);
                 break;
             case TrayIcon::IDM_MIGRATE:
-                StartMigrateCurrentRule();
+                StartMigrateEnabledRules();
                 break;
             case TrayIcon::IDM_RESTORE:
-                StartRestoreCurrentRule();
+                StartRestoreEnabledRules();
                 break;
             case TrayIcon::IDM_EXIT:
                 DestroyWindow(g_mainWnd);
@@ -2911,8 +2766,6 @@ namespace dirmv::gui
             {
                 g_mainWnd = hwnd;
                 g_font = theme::FontBody();
-
-                EnsureCheckImages();
                 RECT crc{};
                 GetClientRect(hwnd, &crc);
                 const int navW = theme::S(kSidebarW);
@@ -2921,13 +2774,15 @@ namespace dirmv::gui
                         CreatePage(hwnd, navW, 0, crc.right - navW, crc.bottom, i == 0);
 
                 BuildRulePage(g_pageHwnd[PAGE_RULES]);
+                BuildTaskPage(g_pageHwnd[PAGE_TASK]);
                 BuildPlanPage(g_pageHwnd[PAGE_PLAN]);
                 BuildSettingsPage(g_pageHwnd[PAGE_SETTINGS]);
 
                 // 左侧导航项
-                static const wchar_t *navLabels[kPageCount] = {L"规则", L"计划", L"设置"};
+                static const wchar_t *navLabels[kPageCount] = {L"规则", L"任务", L"计划", L"设置"};
                 static const wchar_t *navTips[kPageCount] = {
-                    L"管理迁移规则、手动迁移/恢复与日志",
+                    L"管理迁移规则",
+                    L"执行迁移/恢复并查看进度与日志",
                     L"定时间隔与下次运行时间",
                     L"运行参数、后台服务与版本信息"};
                 for (int i = 0; i < kPageCount; ++i)
@@ -3040,7 +2895,6 @@ namespace dirmv::gui
                             (nlv->uNewState & LVIS_SELECTED) != (nlv->uOldState & LVIS_SELECTED))
                         {
                             g_selectedRule = ListView_GetNextItem(g_hRuleList, -1, LVNI_SELECTED);
-                            UpdateRuleButtons();
                         }
                     }
                     else if (nh->code == NM_CLICK || nh->code == NM_DBLCLK)
@@ -3054,29 +2908,14 @@ namespace dirmv::gui
                             g_selectedRule = row;
                             EditRuleFlow();
                         }
-                        else if (nh->code == NM_CLICK && row >= 0 && col == 0)
+                        else if (nh->code == NM_CLICK && row >= 0 && col == 5)
                         {
-                            // 点击复选框列 → 切换该行勾选（仅切换勾选，不改变「操作对象」）
-                            if (row < (int)g_ruleChecked.size())
-                            {
-                                g_ruleChecked[row] = !g_ruleChecked[row];
-                                RefreshRuleList();
-                            }
-                        }
-                        else if (nh->code == NM_CLICK && row >= 0 && col == 6)
-                        {
-                            // 点击「操作」列（编辑）→ 编辑本行规则
+                            // 点击「详情」列 → 打开规则详情
                             g_selectedRule = row;
                             EditRuleFlow();
                         }
                     }
-                    else if (nh->code == LVN_COLUMNCLICK)
-                    {
-                        LPNMLISTVIEW nv = (LPNMLISTVIEW)lParam;
-                        if (nv->iSubItem == 0) // 点击表头复选框列 → 全选/全不选
-                            SetAllChecked(!IsAllChecked());
-                    }
-                }
+                                    }
                 return 0;
             }
             case WM_COMMAND:
