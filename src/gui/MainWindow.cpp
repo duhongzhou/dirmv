@@ -6,6 +6,7 @@
 #include "core/PathUtil.h"
 #include "core/Log.h"
 #include "core/MigrateEngine.h"
+#include "core/FileEngine.h"
 #include "core/Scheduler.h"
 #include "core/PipeServer.h"
 #include "service/ServiceMain.h"
@@ -40,7 +41,7 @@ namespace
         Config g_cfg;
         std::wstring g_iniPath;
 
-        HWND g_hNavButtons[4] = {nullptr, nullptr, nullptr, nullptr}; // 左侧导航按钮
+        HWND g_hNavButtons[5] = {nullptr, nullptr, nullptr, nullptr, nullptr}; // 左侧导航按钮
         HWND g_hRuleList = nullptr;
         HWND g_hLog = nullptr;
         HWND g_hProgress = nullptr;
@@ -48,8 +49,8 @@ namespace
         HWND g_hTaskLabel = nullptr;
         HWND g_hLogLabel = nullptr;
         HWND g_hSvcLogPath = nullptr; // 服务页日志路径
-        // 分页子窗口（0=规则 1=计划 2=服务 3=关于），提前声明供按钮查找使用
-        HWND g_pageHwnd[4] = {nullptr, nullptr, nullptr, nullptr};
+        // 分页子窗口（0=规则 1=任务 2=大小 3=计划 4=设置），提前声明供按钮查找使用
+        HWND g_pageHwnd[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
 
         // 计划页控件
         HWND g_hSchedPeriod = nullptr;
@@ -87,8 +88,9 @@ namespace
 
         const int PAGE_RULES = 0;
         const int PAGE_TASK = 1;
-        const int PAGE_PLAN = 2;
-        const int PAGE_SETTINGS = 3;
+        const int PAGE_SIZE = 2;
+        const int PAGE_PLAN = 3;
+        const int PAGE_SETTINGS = 4;
         // 设置页同时承载「运行参数 / 后台服务 / 关于」，保留旧名以兼容引用
         const int PAGE_SERVICE = PAGE_SETTINGS;
         const int PAGE_ABOUT = PAGE_SETTINGS;
@@ -2040,8 +2042,8 @@ namespace
 
         // 布局常量（DIP，实际绘制统一用 theme::S 缩放）
         const int kSidebarW = 208;
-        const int kPageCount = 4;
-        constexpr int kNavIds[kPageCount] = {2001, 2002, 2003, 2004};
+        const int kPageCount = 5;
+        constexpr int kNavIds[kPageCount] = {2001, 2002, 2003, 2004, 2005};
         const int kNavX = 16;
         const int kNavW = 176;
         const int kNavH = 38;
@@ -2325,6 +2327,232 @@ namespace
             LayoutTaskPage(parent);
         }
 
+        // ==================== 大小页 ====================
+        struct SizeEntry
+        {
+            std::wstring name;
+            unsigned long long bytes = 0;
+        };
+        struct SizeResult
+        {
+            std::vector<SizeEntry> watch;
+            std::vector<SizeEntry> target;
+            unsigned long long watchTotal = 0;
+            unsigned long long targetTotal = 0;
+        };
+
+        HWND g_hSizeRule = nullptr;
+        HWND g_hSizeWatchList = nullptr;
+        HWND g_hSizeTargetList = nullptr;
+        HWND g_hSizeSummary = nullptr;
+        HWND g_hSizeStatus = nullptr;
+        HWND g_hSizeRuleLabel = nullptr;
+        HWND g_hSizeWatchTitle = nullptr;
+        HWND g_hSizeTargetTitle = nullptr;
+        std::atomic<bool> g_sizeBusy{false};
+        std::atomic<bool> g_sizeCancel{false};
+        std::vector<SizeEntry> g_sizeWatchData;
+        std::vector<SizeEntry> g_sizeTargetData;
+
+        void ScanChildDirs(const std::wstring &dir, std::vector<SizeEntry> &out,
+                           unsigned long long &total, std::atomic<bool> &cancel)
+        {
+            auto names = Path::ListSubDirectories(dir);
+            for (const auto &n : names)
+            {
+                if (cancel.load())
+                    return;
+                std::wstring child = Path::Combine(dir, n);
+                if (Path::IsReparsePoint(child))
+                    continue;
+                DirStat st{};
+                if (!FileEngine::Scan(child, st))
+                    continue;
+                out.push_back({n, st.totalBytes});
+                total += st.totalBytes;
+            }
+            std::sort(out.begin(), out.end(),
+                      [](const SizeEntry &a, const SizeEntry &b) { return a.bytes > b.bytes; });
+        }
+
+        void FillSizeList(HWND lv, const std::vector<SizeEntry> &items, unsigned long long total)
+        {
+            if (!lv)
+                return;
+            ListView_DeleteAllItems(lv);
+            for (size_t i = 0; i < items.size(); ++i)
+            {
+                LVITEMW it{};
+                it.mask = LVIF_TEXT;
+                it.iItem = (int)i;
+                it.pszText = const_cast<LPWSTR>(items[i].name.c_str());
+                int row = ListView_InsertItem(lv, &it);
+                std::wstring sz = Path::FormatBytes(items[i].bytes);
+                ListView_SetItemText(lv, row, 1, const_cast<LPWSTR>(sz.c_str()));
+                wchar_t pct[32];
+                swprintf_s(pct, L"%.1f%%", total ? (double)items[i].bytes * 100.0 / (double)total : 0.0);
+                ListView_SetItemText(lv, row, 2, pct);
+            }
+        }
+
+        void OnSizeDone(SizeResult *r)
+        {
+            g_sizeBusy = false;
+            g_sizeWatchData = std::move(r->watch);
+            g_sizeTargetData = std::move(r->target);
+            FillSizeList(g_hSizeWatchList, g_sizeWatchData, r->watchTotal);
+            FillSizeList(g_hSizeTargetList, g_sizeTargetData, r->targetTotal);
+            std::wstring s = L"监视目录合计 " + Path::FormatBytes(r->watchTotal) + L"（" +
+                             std::to_wstring(g_sizeWatchData.size()) + L" 项） · 目标目录合计 " +
+                             Path::FormatBytes(r->targetTotal) + L"（" +
+                             std::to_wstring(g_sizeTargetData.size()) + L" 项）";
+            SetWindowTextW(g_hSizeSummary, s.c_str());
+            SetWindowTextW(g_hSizeStatus, L"");
+            delete r;
+        }
+
+        void StartSizeScan()
+        {
+            if (g_sizeBusy.exchange(true))
+                return;
+            int idx = (int)SendMessageW(g_hSizeRule, CB_GETCURSEL, 0, 0);
+            if (idx < 0 || idx >= (int)g_cfg.rules.size())
+            {
+                SetWindowTextW(g_hSizeStatus, L"没有可用的规则。");
+                SetWindowTextW(g_hSizeSummary, L"");
+                ListView_DeleteAllItems(g_hSizeWatchList);
+                ListView_DeleteAllItems(g_hSizeTargetList);
+                g_sizeBusy = false;
+                return;
+            }
+            std::wstring watch = g_cfg.rules[idx].watchDir;
+            std::wstring target = g_cfg.rules[idx].targetDir;
+            SetWindowTextW(g_hSizeStatus, L"正在统计两个目录的大小…");
+            g_sizeCancel = false;
+            HWND main = g_mainWnd;
+            std::thread th([watch, target, main]() {
+                auto *r = new SizeResult();
+                if (Path::DirectoryExists(watch))
+                    ScanChildDirs(watch, r->watch, r->watchTotal, g_sizeCancel);
+                if (Path::DirectoryExists(target))
+                    ScanChildDirs(target, r->target, r->targetTotal, g_sizeCancel);
+                PostMessageW(main, MainWindow::WM_APP_SIZE, 0, (LPARAM)r);
+            });
+            th.detach();
+        }
+
+        void RefreshSizeRuleCombo()
+        {
+            if (!g_hSizeRule)
+                return;
+            SendMessageW(g_hSizeRule, CB_RESETCONTENT, 0, 0);
+            for (const auto &r : g_cfg.rules)
+            {
+                std::wstring s = r.watchDir + L"  →  " + r.targetDir;
+                SendMessageW(g_hSizeRule, CB_ADDSTRING, 0, (LPARAM)s.c_str());
+            }
+            if (!g_cfg.rules.empty())
+                SendMessageW(g_hSizeRule, CB_SETCURSEL, 0, 0);
+            StartSizeScan();
+        }
+
+        void LayoutSizePage(HWND page)
+        {
+            RECT r;
+            GetClientRect(page, &r);
+            const int left = theme::S(40);
+            const int right = r.right - theme::S(40);
+            const int top = theme::S(104);
+            if (g_hSizeRuleLabel)
+                SetWindowPos(g_hSizeRuleLabel, nullptr, left, top + theme::S(6), theme::S(44),
+                             theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeRule)
+                SetWindowPos(g_hSizeRule, nullptr, left + theme::S(48), top, theme::S(380),
+                             theme::S(30), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (HWND b = GetDlgItem(page, MainWindow::IDC_SIZE_REFRESH))
+                SetWindowPos(b, nullptr, right - theme::S(96), top, theme::S(96), theme::S(30),
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeSummary)
+                SetWindowPos(g_hSizeSummary, nullptr, left, top + theme::S(44), right - left,
+                             theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeStatus)
+                SetWindowPos(g_hSizeStatus, nullptr, right - theme::S(300), top + theme::S(74),
+                             theme::S(300), theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+
+            const int listTop = top + theme::S(100);
+            const int listH = r.bottom - listTop - theme::S(20);
+            const int gap = theme::S(24);
+            const int w = (right - left - gap) / 2;
+            const int pctW = theme::S(58);
+            const int sizeW = theme::S(88);
+            const int nameW = w - pctW - sizeW - theme::S(26);
+            auto fitCols = [&](HWND lv) {
+                if (!lv)
+                    return;
+                ListView_SetColumnWidth(lv, 0, nameW);
+                ListView_SetColumnWidth(lv, 1, sizeW);
+                ListView_SetColumnWidth(lv, 2, pctW);
+            };
+            fitCols(g_hSizeWatchList);
+            fitCols(g_hSizeTargetList);
+            if (g_hSizeWatchTitle)
+                SetWindowPos(g_hSizeWatchTitle, nullptr, left, listTop - theme::S(24), w,
+                             theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeTargetTitle)
+                SetWindowPos(g_hSizeTargetTitle, nullptr, left + w + gap, listTop - theme::S(24), w,
+                             theme::S(20), SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeWatchList)
+                SetWindowPos(g_hSizeWatchList, nullptr, left, listTop, w, listH,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_hSizeTargetList)
+                SetWindowPos(g_hSizeTargetList, nullptr, left + w + gap, listTop, w, listH,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        void BuildSizePage(HWND parent)
+        {
+            PageHeader(parent, L"大小", L"扫描监视目录与目标目录的直接子目录，按占用大小排序");
+
+            g_hSizeRuleLabel = MakeLabel(parent, L"规则", 0, 0, 44, 20, theme::FontBody(), theme::Text);
+            g_hSizeRule = MakeCombo(parent, MainWindow::IDC_SIZE_RULE, 0, 0, 380, 4096);
+            theme::CreateButton(parent, MainWindow::IDC_SIZE_REFRESH, L"刷新", theme::BtnRole::BtnDefault,
+                                0, 0, 96, 30);
+            g_hSizeSummary = MakeLabel(parent, L"", 0, 0, 600, 20, theme::FontBody(), theme::Text);
+            g_hSizeStatus = MakeLabel(parent, L"", 0, 0, 320, 20, theme::FontSmall(), theme::TextMuted);
+            g_hSizeWatchTitle = MakeLabel(parent, L"监视目录", 0, 0, 260, 20, theme::FontBodyBold(),
+                                          theme::Text);
+            g_hSizeTargetTitle = MakeLabel(parent, L"目标目录", 0, 0, 260, 20, theme::FontBodyBold(),
+                                           theme::Text);
+
+            const wchar_t *heads[3] = {L"直接子目录", L"大小", L"占比"};
+            const int kCols[3] = {220, 90, 70};
+            auto makeLv = [&](int id) {
+                HWND lv = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                          WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL |
+                                              LVS_SHOWSELALWAYS,
+                                          0, 0, 300, 200, parent, (HMENU)(INT_PTR)id, g_hInst,
+                                          nullptr);
+                ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+                theme::ApplyFont(lv, theme::FontBody());
+                if (HWND hdr = ListView_GetHeader(lv))
+                    theme::ApplyFont(hdr, theme::FontSmall());
+                for (int i = 0; i < 3; ++i)
+                {
+                    LVCOLUMNW col{};
+                    col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+                    col.pszText = (LPWSTR)heads[i];
+                    col.cx = theme::S(kCols[i]);
+                    col.fmt = (i == 1 || i == 2) ? LVCFMT_RIGHT : LVCFMT_LEFT;
+                    ListView_InsertColumn(lv, i, &col);
+                }
+                return lv;
+            };
+            g_hSizeWatchList = makeLv(MainWindow::IDC_SIZE_LIST_WATCH);
+            g_hSizeTargetList = makeLv(MainWindow::IDC_SIZE_LIST_TARGET);
+
+            AddTipById(parent, MainWindow::IDC_SIZE_REFRESH, L"重新统计监视目录与目标目录的直接子目录大小");
+            LayoutSizePage(parent);
+        }
         void BuildPlanPage(HWND parent)
         {
             PageHeader(parent, L"计划", L"按计划定时扫描已启用的规则并自动迁移新目录");
@@ -2477,7 +2705,8 @@ namespace
                 LayoutRulePage(page);
             else if (page == g_pageHwnd[PAGE_TASK])
                 LayoutTaskPage(page);
-            InvalidateRect(page, nullptr, TRUE);
+            else if (page == g_pageHwnd[PAGE_SIZE])
+                LayoutSizePage(page);
         }
     } // namespace
 
@@ -2502,6 +2731,8 @@ namespace
                     LayoutRulePage(hwnd);
                 else if (hwnd == g_pageHwnd[PAGE_TASK])
                     LayoutTaskPage(hwnd);
+                else if (hwnd == g_pageHwnd[PAGE_SIZE])
+                    LayoutSizePage(hwnd);
                 InvalidateRect(hwnd, nullptr, TRUE);
                 return 0;
             case WM_PAINT:
@@ -2632,9 +2863,13 @@ namespace
                 ShowPage(PAGE_TASK);
                 break;
             case kNavIds[2]:
-                ShowPage(PAGE_PLAN);
+                ShowPage(PAGE_SIZE);
+                RefreshSizeRuleCombo();
                 break;
             case kNavIds[3]:
+                ShowPage(PAGE_PLAN);
+                break;
+            case kNavIds[4]:
                 ShowPage(PAGE_SETTINGS);
                 break;
 
@@ -2729,6 +2964,13 @@ namespace
                 break;
             }
 
+            case MainWindow::IDC_SIZE_REFRESH:
+                StartSizeScan();
+                break;
+            case MainWindow::IDC_SIZE_RULE:
+                StartSizeScan();
+                break;
+
             case TrayIcon::IDM_SHOW:
                 ShowWindow(g_mainWnd, SW_SHOW);
                 SetForegroundWindow(g_mainWnd);
@@ -2775,14 +3017,17 @@ namespace
 
                 BuildRulePage(g_pageHwnd[PAGE_RULES]);
                 BuildTaskPage(g_pageHwnd[PAGE_TASK]);
+                BuildSizePage(g_pageHwnd[PAGE_SIZE]);
                 BuildPlanPage(g_pageHwnd[PAGE_PLAN]);
                 BuildSettingsPage(g_pageHwnd[PAGE_SETTINGS]);
 
                 // 左侧导航项
-                static const wchar_t *navLabels[kPageCount] = {L"规则", L"任务", L"计划", L"设置"};
+                static const wchar_t *navLabels[kPageCount] = {L"规则", L"任务", L"大小", L"计划",
+                                                               L"设置"};
                 static const wchar_t *navTips[kPageCount] = {
                     L"管理迁移规则",
                     L"执行迁移/恢复并查看进度与日志",
+                    L"对比监视目录与目标目录的直接子目录大小",
                     L"定时间隔与下次运行时间",
                     L"运行参数、后台服务与版本信息"};
                 for (int i = 0; i < kPageCount; ++i)
@@ -2915,7 +3160,43 @@ namespace
                             EditRuleFlow();
                         }
                     }
-                                    }
+                }
+                if ((nh->idFrom == MainWindow::IDC_SIZE_LIST_WATCH ||
+                     nh->idFrom == MainWindow::IDC_SIZE_LIST_TARGET) &&
+                    nh->code == NM_CUSTOMDRAW)
+                {
+                    LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lParam;
+                    if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                    {
+                        return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYSUBITEMDRAW;
+                    }
+                    if (cd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM) &&
+                        cd->iSubItem == 1)
+                    {
+                        const std::vector<SizeEntry> &data =
+                            (nh->idFrom == MainWindow::IDC_SIZE_LIST_WATCH) ? g_sizeWatchData
+                                                                             : g_sizeTargetData;
+                        size_t idx = (size_t)cd->nmcd.dwItemSpec;
+                        unsigned long long maxB = 0;
+                        for (const auto &e : data)
+                        {
+                            if (e.bytes > maxB)
+                                maxB = e.bytes;
+                        }
+                        if (idx < data.size() && maxB > 0)
+                        {
+                            RECT r = cd->nmcd.rc;
+                            int w = (int)((double)data[idx].bytes / (double)maxB *
+                                          (r.right - r.left));
+                            RECT bar{r.left, r.bottom - theme::S(6), r.left + w,
+                                     r.bottom - theme::S(2)};
+                            HBRUSH br = CreateSolidBrush(theme::AccentSoft);
+                            FillRect(cd->nmcd.hdc, &bar, br);
+                            DeleteObject(br);
+                        }
+                    }
+                    return CDRF_DODEFAULT;
+                }
                 return 0;
             }
             case WM_COMMAND:
@@ -2969,6 +3250,13 @@ namespace
                     if (r)
                         OnTaskDone(r);
                 }
+                return 0;
+            }
+            case MainWindow::WM_APP_SIZE:
+            {
+                auto *r = reinterpret_cast<SizeResult *>(lParam);
+                if (r)
+                    OnSizeDone(r);
                 return 0;
             }
             case MainWindow::WM_APP_LOCK:

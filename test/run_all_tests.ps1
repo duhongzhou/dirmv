@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # run_all_tests.ps1 - 一键运行全部测试
 #   1) clitest.ps1   —— 用「测试规则文件」通过 CLI 驱动，验证各项功能
-#   2) guitest.ps1  —— GUI 冒烟测试（10 项）
+#   2) guitest.ps1  —— GUI 冒烟测试（21 项）
 #   3) run_tests.ps1 —— 原有综合功能测试（58 项）
 #
 #   安全：全部在 test\sandbox 下操作，不碰真实目录。
@@ -29,8 +29,9 @@ foreach ($s in $suites) {
 Write-Host "`n================= 汇总 =================" -ForegroundColor Magenta
 $bad = 0
 foreach ($r in $results) {
-    $color = if ($r.ExitCode -eq 0) { "Green" } else { "Red"; $bad++ }
-    Write-Host ("  {0,-36} {1}" -f $r.Suite, $(if ($r.ExitCode -eq 0) { "PASS" } else { "FAIL($($r.ExitCode))" })) -ForegroundColor $color
+    $ok = $r.ExitCode -eq 0
+    if (-not $ok) { $bad++ }
+    Write-Host ("  {0,-36} {1}" -f $r.Suite, $(if ($ok) { "PASS" } else { "FAIL($($r.ExitCode))" })) -ForegroundColor $(if ($ok) { "Green" } else { "Red" })
 }
 
 # 清理沙箱

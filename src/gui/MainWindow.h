@@ -66,6 +66,14 @@ namespace dirmv::gui
             IDC_BTN_SVCREMOVE = 1045,
             IDC_BTN_OPENLOG = 1046, // 打开服务日志文件
 
+            // 大小页
+            IDC_SIZE_RULE = 1050,
+            IDC_SIZE_REFRESH = 1051,
+            IDC_SIZE_LIST_WATCH = 1052,
+            IDC_SIZE_LIST_TARGET = 1053,
+            IDC_SIZE_SUMMARY = 1054,
+            IDC_SIZE_STATUS = 1055,
+
             IDC_WD_BASE = 1100, // 星期复选框基址（+0..6）
         };
 
@@ -74,6 +82,7 @@ namespace dirmv::gui
         static constexpr UINT WM_APP_DONE = WM_APP + 2;
         static constexpr UINT WM_APP_LOG = WM_APP + 3;
         static constexpr UINT WM_APP_LOCK = WM_APP + 4;
+        static constexpr UINT WM_APP_SIZE = WM_APP + 5;
     };
 
 } // namespace dirmv::gui
