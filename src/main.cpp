@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <string>
+#include <cwchar>
 
 // 判断命令行是否包含指定开关（不区分大小写）
 static bool HasSwitch(const std::wstring &cmdLine, const wchar_t *sw)
@@ -71,8 +72,20 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR lpCmdLine, int nCmdSh
     }
     if (HasSwitch(cmd, L"--cli") || HasSwitch(cmd, L"--console"))
     {
-        // 控制台模式（迁移/恢复/服务管理）
-        return dirmv::RunCli(cmd);
+        // 控制台模式（迁移/恢复/服务管理）。
+        // lpCmdLine 含开关本身（如 "--cli migrate ..."），RunCli 期望首 token 是命令，
+        // 因此先去掉 --cli / --console 开关再转发。
+        std::wstring cli = cmd;
+        for (const wchar_t *sw : {L"--cli", L"--console"})
+        {
+            size_t pos = cli.find(sw);
+            if (pos != std::wstring::npos)
+            {
+                cli.erase(pos, wcslen(sw));
+                break;
+            }
+        }
+        return dirmv::RunCli(cli);
     }
 
     // GUI：支持 --config <path> 指定配置文件（测试时指向沙箱）

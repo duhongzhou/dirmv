@@ -253,15 +253,16 @@ namespace dirmv
                  L"，占用 " + std::to_wstring(r.locked) +
                  L"，失败 " + std::to_wstring(r.failed) + L"\n");
 
-            // 若有占用/失败，创建一次性重试任务（只创建一次）
-            if ((r.locked > 0 || r.failed > 0) && cfg.retryDelayMinutes > 0)
+            // 若有占用/失败，创建一次性重试任务（0 表示使用默认 5 分钟）
+            if (r.locked > 0 || r.failed > 0)
             {
+                int delayMin = cfg.retryDelayMinutes > 0 ? cfg.retryDelayMinutes : 5;
                 std::wstring taskName = L"dirMover_RetryOnce";
                 std::wstring err = Scheduler::CreateOnceRetryTask(
-                    taskName, Path::ExePath(), configPath, cfg.retryDelayMinutes);
+                    taskName, Path::ExePath(), configPath, delayMin);
                 if (err.empty())
                     WOut(L"已创建一次性重试任务，将在 " +
-                         std::to_wstring(cfg.retryDelayMinutes) + L" 分钟后重试。\n");
+                         std::to_wstring(delayMin) + L" 分钟后重试。\n");
                 else
                     WOut(L"重试任务: " + err + L"\n");
             }

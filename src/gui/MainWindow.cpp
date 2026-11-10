@@ -2189,7 +2189,9 @@ namespace dirmv::gui
             AddTipById(parent, MainWindow::IDC_THREADS, L"同时迁移的目录数；0 表示自动（最多 8）");
             AddTipById(parent, MainWindow::IDC_WATCHER, L"目录一出现就自动迁移");
             AddTipById(parent, MainWindow::IDC_LOCKDETECT,
-                       L"迁移前检测文件是否被占用，占用则本次跳过");
+                       L"迁移前检测文件是否被占用，占用则本次跳过并创建一次性重试任务");
+            AddTipById(parent, MainWindow::IDC_RETRYMIN,
+                       L"占用/失败后创建一次性重试任务的间隔；0 表示使用默认 5 分钟");
         }
 
         void BuildServicePage(HWND parent)

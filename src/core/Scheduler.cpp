@@ -183,16 +183,12 @@ namespace dirmv
                                                 const std::wstring &configPath,
                                                 int delayMinutes)
     {
-        // 「只创建一次」：已存在则直接返回成功，不重复创建
-        if (TaskExists(taskName))
-        {
-            LOGI(L"重试计划任务已存在，不再重复创建: " + taskName);
-            return L"";
-        }
+        // 重新武装：任务可能已经执行过（一次性任务执行后仍留在计划任务库里），
+        // 若直接跳过就再也不会重试。这里统一用 /F 覆盖重建。
+        if (delayMinutes < 1)
+            delayMinutes = 5;
 
         // 计算触发时刻 = 现在 + delayMinutes
-        SYSTEMTIME st;
-        GetLocalTime(&st);
         std::time_t now = time(nullptr);
         std::time_t when = now + (std::time_t)delayMinutes * 60;
         std::tm lt{};
@@ -203,14 +199,22 @@ namespace dirmv
         // schtasks /SD 需要 yyyy/mm/dd 格式
         swprintf_s(dateStr, L"%04d/%02d/%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
 
-        // <exe> --cli migrate --config <ini>
-        std::wstring cmd = L"\\\"" + exePath + L"\\\" --cli migrate --config \\\"" +
-                           configPath + L"\\\"";
-        (void)st;
+        // 优先使用同目录下的控制台版 dirMover_cli.exe（GUI 版 --cli 也可，但控制台版更合适）
+        std::wstring exe = exePath;
+        std::wstring cliExe = Path::Combine(Path::ParentDir(exePath), L"dirMover_cli.exe");
+        bool useCli = Path::FileExists(cliExe);
+        if (useCli)
+            exe = cliExe;
 
+        // 控制台版直接跟 migrate；GUI 版需要 --cli 开关
+        std::wstring cmd = L"\\\"" + exe + L"\\\"" + (useCli ? L"" : L" --cli") +
+                           L" migrate --config \\\"" + configPath + L"\\\"";
+
+        // /RU SYSTEM：以 SYSTEM 运行，不依赖当前登录用户；/RL HIGHEST 确保
+        // 迁移时能创建符号链接；/F 覆盖同名旧任务，保证每次失败都能重新武装。
         std::wstring full = L"schtasks.exe /Create /F /TN \"" + taskName +
                             L"\" /TR \"" + cmd + L"\" /SC ONCE /SD " + dateStr +
-                            L" /ST " + timeStr + L" /RL HIGHEST";
+                            L" /ST " + timeStr + L" /RL HIGHEST /RU SYSTEM";
         DWORD ec = 0;
         std::wstring out = RunAndCapture(full, ec);
         if (ec != 0)
@@ -219,7 +223,7 @@ namespace dirmv
             return L"创建重试计划任务失败 (" + std::to_wstring(ec) + L")";
         }
         LOGI(L"已创建一次性重试计划任务: " + taskName + L" 于 " +
-             dateStr + L" " + timeStr);
+             dateStr + L" " + timeStr + L"（以 SYSTEM 运行）");
         return L"";
     }
 

@@ -42,6 +42,9 @@ namespace dirmv
                             bool manual = false);
         std::wstring HandlePipe(PipeCommand cmd, const std::wstring &arg);
         void OnLockNotice(const LockNotice &notice);
+        // 本次迁移有目录未完成（被占用或失败）时，创建一次性重试任务。
+        // delayMin<=0 表示使用默认 5 分钟；一分钟内不重复创建。
+        void ScheduleRetryOnce(int delayMin);
         // 依据当前配置（仅正确可用的规则）重建文件系统监视器
         void SetupWatchers();
 
@@ -64,6 +67,9 @@ namespace dirmv
 
         // 监视触发去抖：短时间内多次变化只触发一次迁移
         std::atomic<int64_t> lastWatcherTrigger_{0};
+
+        // 重试任务创建去抖
+        std::atomic<unsigned long long> lastRetryTick_{0};
 
         std::vector<std::unique_ptr<DirectoryWatcher>> watchers_;
         std::unique_ptr<PipeServer> pipe_;

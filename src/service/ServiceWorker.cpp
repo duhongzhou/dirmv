@@ -120,8 +120,11 @@ namespace dirmv
             std::lock_guard<std::mutex> lk(cfgMtx_);
             delay = cfg_.retryDelayMinutes;
         }
-        detail += L"\r\n将创建一次性重试任务，在 " + std::to_wstring(delay) +
-                  L" 分钟后自动重试（仅一次）。\r\n";
+        if (delay <= 0)
+            delay = 5;
+
+        detail += L"\r\n将为未完成的目录创建一次性重试任务，约 " + std::to_wstring(delay) +
+                  L" 分钟后自动重试。\r\n";
         detail += L"处理建议：请保存并关闭上述程序后等待自动重试，或手动执行迁移。";
 
         LOGE(L"[占用通知] " + detail);
@@ -131,20 +134,34 @@ namespace dirmv
         if (notice.locks.empty())
             return;
 
-        // 0 分钟 = 不自动重试
-        if (delay <= 0)
+        // 真正的任务创建在迁移结束后统一进行（ScheduleRetryOnce），
+        // 这样「失败」与「占用」都会生成任务，且每次运行只建一次。
+    }
+
+    void ServiceWorker::ScheduleRetryOnce(int delayMin)
+    {
+        if (delayMin <= 0)
+            delayMin = 5; // 0 表示使用默认值，而不是「不重试」
+        if (delayMin > 1440)
+            delayMin = 1440;
+
+        // 一分钟内不重复创建，避免一次运行里多个子任务反复建任务
+        unsigned long long now = GetTickCount64();
+        unsigned long long prev = lastRetryTick_.load();
+        if (prev != 0 && now - prev < 60000)
+            return;
+        if (!lastRetryTick_.compare_exchange_strong(prev, now))
+            return;
+
+        std::wstring err = Scheduler::CreateOnceRetryTask(
+            L"dirMover_RetryOnce", Path::ExePath(), ConfigStore::DefaultPath(), delayMin);
+        if (!err.empty())
         {
-            LOGE(L"[占用] 未启用自动重试（RetryDelayMinutes=0）");
+            lastRetryTick_ = 0; // 失败允许下次再试
+            LOGE(L"创建重试任务失败: " + err);
             return;
         }
-
-        // 创建一次性重试计划任务（只创建一次）
-        std::wstring exePath = Path::ExePath();
-        std::wstring cfgPath = ConfigStore::DefaultPath();
-        std::wstring taskName = L"dirMover_RetryOnce";
-        std::wstring err = Scheduler::CreateOnceRetryTask(taskName, exePath, cfgPath, delay);
-        if (!err.empty())
-            LOGE(L"创建重试任务失败: " + err);
+        LOGI(L"已创建一次性重试任务，将在 " + std::to_wstring(delayMin) + L" 分钟后重试");
     }
 
     // ---------------------------------------------------------------------------
@@ -219,6 +236,8 @@ namespace dirmv
                                                  { OnLockNotice(n); },
                                                  skip);
                 recordCooldown(result);
+                if (result.locked > 0 || result.failed > 0)
+                    ScheduleRetryOnce(local.retryDelayMinutes);
                 {
                     std::lock_guard<std::mutex> lk(lastRunMtx_);
                     lastRunInfo_ = L"迁移完成(单条): 总 " + std::to_wstring(result.total) +
@@ -257,6 +276,8 @@ namespace dirmv
                 { OnLockNotice(n); },
                 skip);
             recordCooldown(result);
+            if (result.locked > 0 || result.failed > 0)
+                ScheduleRetryOnce(local.retryDelayMinutes);
 
             {
                 std::lock_guard<std::mutex> lk(lastRunMtx_);
