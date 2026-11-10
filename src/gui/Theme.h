@@ -64,6 +64,7 @@ namespace dirmv::gui::theme
         BtnDanger = 2,  // 危险操作用描边
         BtnGhost = 3,   // 无边框文字按钮
         BtnTab = 4,     // 分段标签
+        BtnNav = 5,     // 侧边导航项（左对齐、选中浅色底）
     };
 
     void RegisterControls(HINSTANCE hInst);

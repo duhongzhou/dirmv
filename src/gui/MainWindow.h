@@ -64,6 +64,7 @@ namespace dirmv::gui
             IDC_BTN_SVCSTART = 1043,
             IDC_BTN_SVCSTOP = 1044,
             IDC_BTN_SVCREMOVE = 1045,
+            IDC_BTN_OPENLOG = 1046, // 打开服务日志文件
 
             IDC_WD_BASE = 1100, // 星期复选框基址（+0..6）
         };

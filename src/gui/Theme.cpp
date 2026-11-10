@@ -69,6 +69,7 @@ namespace dirmv::gui::theme
                 return;
             }
             const float PI = 3.14159265f;
+            (void)PI;
             path.AddArc(r.X, r.Y, d, d, 180.0f, 90.0f);
             path.AddArc(r.X + r.Width - d, r.Y, d, d, 270.0f, 90.0f);
             path.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0.0f, 90.0f);
@@ -223,6 +224,28 @@ namespace dirmv::gui::theme
                 }
                 textBg = fill;
                 break;
+            case BtnNav:
+                if (st->active)
+                {
+                    fill = AccentSoft;
+                    border = AccentSoft;
+                    text = Accent;
+                }
+                else
+                {
+                    fill = Card;
+                    border = Card;
+                    text = TextSub;
+                    if (!enabled)
+                        text = TextMuted;
+                    else if (st->pressed)
+                        fill = SegHover;
+                    else if (st->hover)
+                        fill = HoverFill;
+                    border = fill;
+                }
+                textBg = fill;
+                break;
             case BtnDefault:
             default:
                 fill = Card;
@@ -278,14 +301,27 @@ namespace dirmv::gui::theme
             HFONT f = (st->role == BtnPrimary || st->role == BtnTab) ? FontBodyBold() : FontBody();
             if (st->role == BtnTab && !st->active)
                 f = FontBody();
+            if (st->role == BtnNav && st->active)
+                f = FontBodyBold();
             SelectObject(mem, f);
             SetTextColor(mem, text);
             wchar_t buf[256]{};
             GetWindowTextW(h, buf, 256);
             RECT tr = r;
-            tr.left += Scaled(6);
-            tr.right -= Scaled(6);
-            DrawTextW(mem, buf, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (st->role == BtnNav)
+            {
+                tr.left += Scaled(14);
+                tr.right -= Scaled(10);
+                DrawTextW(mem, buf, -1, &tr,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+            else
+            {
+                tr.left += Scaled(6);
+                tr.right -= Scaled(6);
+                DrawTextW(mem, buf, -1, &tr,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
 
             BitBlt(target, 0, 0, w, ht, mem, 0, 0, SRCCOPY);
             SelectObject(mem, oldBmp);

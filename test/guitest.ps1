@@ -87,11 +87,11 @@ try {
     Check "主窗口标题含 dirMover" ([G]::Text($main) -like '*dirMover*')
 
     $kids = [G]::Children($main)
-    $tabs = @($kids | Where-Object { [G]::Class($_) -eq 'DirMvButton' -and [G]::GetDlgCtrlID($_) -in 2001,2002,2003 })
-    Check "顶部三个页签按钮存在" ($tabs.Count -eq 3)
+    $navs = @($kids | Where-Object { [G]::Class($_) -eq 'DirMvButton' -and [G]::GetDlgCtrlID($_) -in 2001,2002,2003,2004 })
+    Check "左侧四个导航按钮存在" ($navs.Count -eq 4)
 
     $pages = @($kids | Where-Object { [G]::Class($_) -eq 'dirMoverPage' })
-    Check "三个页面容器存在" ($pages.Count -eq 3)
+    Check "四个页面容器存在" ($pages.Count -eq 4)
 
     $lv = $kids | Where-Object { [G]::Class($_) -eq 'SysListView32' } | Select-Object -First 1
     $script:lv = $lv
@@ -103,22 +103,32 @@ try {
     Check "日志输出框存在(ID 1011)" ($null -ne $log)
 
     # 切到计划页
-    $tabPlan = $tabs | Where-Object { [G]::GetDlgCtrlID($_) -eq 2002 }
-    [G]::SendMessageW($main, 0x0111, [IntPtr]2002, [IntPtr]$tabPlan) | Out-Null  # WM_COMMAND BN_CLICKED -> 父窗口
+    $navPlan = $navs | Where-Object { [G]::GetDlgCtrlID($_) -eq 2002 }
+    [G]::SendMessageW($main, 0x0111, [IntPtr]2002, [IntPtr]$navPlan) | Out-Null  # WM_COMMAND BN_CLICKED -> 父窗口
     Start-Sleep -Milliseconds 300
 
     # 检查可见性：页 1 可见、页 0 隐藏
     $vis = @($pages | ForEach-Object { [G]::IsWindowVisible($_) })
-    Check "计划页签切换到第 2 页" ($vis[1] -and -not $vis[0])
+    Check "计划导航切换到第 2 页" ($vis[1] -and -not $vis[0])
 
-    $tabAbout = $tabs | Where-Object { [G]::GetDlgCtrlID($_) -eq 2003 }
-    [G]::SendMessageW($main, 0x0111, [IntPtr]2003, [IntPtr]$tabAbout) | Out-Null
+    $navSvc = $navs | Where-Object { [G]::GetDlgCtrlID($_) -eq 2003 }
+    [G]::SendMessageW($main, 0x0111, [IntPtr]2003, [IntPtr]$navSvc) | Out-Null
     Start-Sleep -Milliseconds 300
     $vis2 = @($pages | ForEach-Object { [G]::IsWindowVisible($_) })
-    Check "关于页签切换到第 3 页" ($vis2[2] -and -not $vis2[1])
+    Check "服务导航切换到第 3 页" ($vis2[2] -and -not $vis2[1])
 
     $svc = $kids | Where-Object { [G]::GetDlgCtrlID($_) -eq 1041 } | Select-Object -First 1
-    Check "关于页服务状态文字非空" ($null -ne $svc -and [G]::Text($svc).Length -gt 0)
+    Check "服务页状态文字非空" ($null -ne $svc -and [G]::Text($svc).Length -gt 0)
+
+    # 停止服务按钮存在（1044）
+    $svcStop = $kids | Where-Object { [G]::GetDlgCtrlID($_) -eq 1044 } | Select-Object -First 1
+    Check "服务页停止按钮存在(ID 1044)" ($null -ne $svcStop)
+
+    $navAbout = $navs | Where-Object { [G]::GetDlgCtrlID($_) -eq 2004 }
+    [G]::SendMessageW($main, 0x0111, [IntPtr]2004, [IntPtr]$navAbout) | Out-Null
+    Start-Sleep -Milliseconds 300
+    $vis3 = @($pages | ForEach-Object { [G]::IsWindowVisible($_) })
+    Check "关于导航切换到第 4 页" ($vis3[3] -and -not $vis3[2])
 
     [G]::PostMessageW($main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE
     Start-Sleep -Milliseconds 500
