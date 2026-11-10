@@ -88,5 +88,12 @@ if (Test-Path $exe) {
 Get-Service dirMoverSvc -ErrorAction SilentlyContinue | ForEach-Object {
     Log "服务状态: $($_.Status) 启动类型: $($_.StartType)"
 }
+$qc = (& sc.exe qc dirMoverSvc 2>&1 | Out-String)
+$startLine = (($qc -split "`r?`n") | Where-Object { $_ -match 'START_TYPE' } | Select-Object -First 1)
+Log ("服务启动配置: " + $startLine.Trim())
+if ($startLine -match 'DELAYED') { Log "WARN: 仍为延迟启动，开机后约 2 分钟才启动" }
+$qf = (& sc.exe qfailure dirMoverSvc 2>&1 | Out-String)
+$actLines = (($qf -split "`r?`n") | Where-Object { $_ -match 'RESTART|RESET_PERIOD' } | Select-Object -First 3)
+Log ("失败恢复配置: " + (($actLines | ForEach-Object { $_.Trim() }) -join '; '))
 Log "DONE"
 exit 0

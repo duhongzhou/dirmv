@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(dirMover
-    VERSION 1.4.0
+    VERSION 1.4.1
     DESCRIPTION "目录软链接迁移/恢复工具 - 将非白名单目录迁移到目标目录并创建链接"
     LANGUAGES CXX)
 

@@ -60,8 +60,25 @@ namespace dirmv
             desc.lpDescription = const_cast<LPWSTR>(
                 L"监视目录并在后台自动/定时把非白名单目录迁移到目标目录并创建链接");
             ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
-            SERVICE_DELAYED_AUTO_START_INFO delayed{TRUE};
+            // 立即随系统启动：显式关闭「延迟启动」，旧版本安装过的延迟标记
+            // 在升级时一并清除，避免开机两分钟后才启动或被误认为未启动。
+            SERVICE_DELAYED_AUTO_START_INFO delayed{FALSE};
             ChangeServiceConfig2W(svc, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, &delayed);
+
+            // 意外退出时由 SCM 自动拉起：5 秒 / 15 秒 / 60 秒，24 小时后重置计数。
+            // 开机阶段若遇到磁盘/权限等偶发问题，不会就此永久停止。
+            SC_ACTION actions[3] = {};
+            actions[0].Type = SC_ACTION_RESTART;
+            actions[0].Delay = 5000;
+            actions[1].Type = SC_ACTION_RESTART;
+            actions[1].Delay = 15000;
+            actions[2].Type = SC_ACTION_RESTART;
+            actions[2].Delay = 60000;
+            SERVICE_FAILURE_ACTIONSW failure{};
+            failure.dwResetPeriod = 86400;
+            failure.cActions = 3;
+            failure.lpsaActions = actions;
+            ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failure);
             CloseServiceHandle(svc);
         }
         CloseServiceHandle(scm);
