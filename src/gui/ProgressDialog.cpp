@@ -1,4 +1,5 @@
 #include "gui/ProgressDialog.h"
+#include "gui/Theme.h"
 #include "core/PathUtil.h"
 
 #include <windows.h>
@@ -12,12 +13,7 @@ namespace dirmv::gui
     namespace
     {
         std::atomic<bool> g_cancelled{false};
-        HFONT g_pdFont = nullptr;
-
-        struct PdUpdate
-        {
-            ProgressInfo info;
-        };
+        HWND g_pdPhaseVal = nullptr;
     }
 
     LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -28,45 +24,48 @@ namespace dirmv::gui
         {
             g_cancelled = false;
 
-            CreateWindowExW(0, L"STATIC", L"阶段：", WS_CHILD | WS_VISIBLE,
-                            12, 10, 60, 20, hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_PHASE,
-                            nullptr, nullptr);
+            HWND phaseLabel = CreateWindowExW(0, L"STATIC", L"阶段：", WS_CHILD | WS_VISIBLE,
+                                              theme::S(20), theme::S(18), theme::S(50), theme::S(20),
+                                              hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_PHASE,
+                                              nullptr, nullptr);
             HWND phase = CreateWindowExW(0, L"STATIC", L"准备中", WS_CHILD | WS_VISIBLE,
-                                         72, 10, 380, 20, hwnd, nullptr, nullptr, nullptr);
+                                         theme::S(72), theme::S(18), theme::S(388), theme::S(20),
+                                         hwnd, nullptr, nullptr, nullptr);
+            g_pdPhaseVal = phase;
+            SetPropW(phase, L"dirmv_pd_clr", (HANDLE)(INT_PTR)(theme::Accent + 1));
 
             HWND bar = CreateWindowExW(0, PROGRESS_CLASSW, L"",
                                        WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-                                       12, 38, 440, 24,
-                                       hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_BAR, nullptr, nullptr);
+                                       theme::S(20), theme::S(46), theme::S(440), theme::S(10),
+                                       hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_BAR, nullptr,
+                                       nullptr);
             SendMessageW(bar, PBM_SETRANGE, 0, MAKELPARAM(0, 1000));
             SendMessageW(bar, PBM_SETPOS, 0, 0);
+            SendMessageW(bar, PBM_SETBARCOLOR, 0, (LPARAM)theme::Accent);
+            SendMessageW(bar, PBM_SETBKCOLOR, 0, (LPARAM)theme::SegBg);
 
             HWND text = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                        12, 70, 440, 36, hwnd,
-                                        (HMENU)(INT_PTR)ProgressDialog::IDC_PD_TEXT, nullptr, nullptr);
+                                        theme::S(20), theme::S(66), theme::S(440), theme::S(44),
+                                        hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_TEXT, nullptr,
+                                        nullptr);
 
             HWND eta = CreateWindowExW(0, L"STATIC", L"预计剩余：--", WS_CHILD | WS_VISIBLE,
-                                       12, 110, 220, 20, hwnd,
-                                       (HMENU)(INT_PTR)ProgressDialog::IDC_PD_ETA, nullptr, nullptr);
+                                       theme::S(20), theme::S(116), theme::S(212), theme::S(20),
+                                       hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_ETA, nullptr,
+                                       nullptr);
 
             HWND speed = CreateWindowExW(0, L"STATIC", L"速度：--", WS_CHILD | WS_VISIBLE,
-                                         240, 110, 212, 20, hwnd,
-                                         (HMENU)(INT_PTR)ProgressDialog::IDC_PD_SPEED, nullptr, nullptr);
+                                         theme::S(240), theme::S(116), theme::S(220), theme::S(20),
+                                         hwnd, (HMENU)(INT_PTR)ProgressDialog::IDC_PD_SPEED, nullptr,
+                                         nullptr);
 
-            HWND cancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                          380, 138, 72, 28, hwnd,
-                                          (HMENU)(INT_PTR)ProgressDialog::IDC_PD_CANCEL, nullptr, nullptr);
+            HWND cancel = theme::CreateButton(hwnd, ProgressDialog::IDC_PD_CANCEL, L"取消",
+                                              theme::BtnRole::BtnDefault, theme::S(364),
+                                              theme::S(158), theme::S(96), theme::S(32));
 
-            NONCLIENTMETRICSW ncm{};
-            ncm.cbSize = sizeof(ncm);
-            SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-            g_pdFont = CreateFontIndirectW(&ncm.lfMessageFont);
-
-            HWND ctrls[] = {phase, text, eta, speed, cancel,
-                            GetDlgItem(hwnd, ProgressDialog::IDC_PD_PHASE)};
+            HWND ctrls[] = {phaseLabel, phase, text, eta, speed, cancel};
             for (HWND c : ctrls)
-                if (c)
-                    SendMessageW(c, WM_SETFONT, (WPARAM)g_pdFont, TRUE);
+                theme::ApplyFont(c, theme::FontBody());
             return 0;
         }
         case WM_COMMAND:
@@ -84,7 +83,8 @@ namespace dirmv::gui
             {
                 SendMessageW(GetDlgItem(hwnd, ProgressDialog::IDC_PD_BAR),
                              PBM_SETPOS, (WPARAM)(info->percent * 10.0), 0);
-                SetDlgItemTextW(hwnd, ProgressDialog::IDC_PD_PHASE, info->phase.c_str());
+                if (IsWindow(g_pdPhaseVal))
+                    SetWindowTextW(g_pdPhaseVal, info->phase.c_str());
 
                 wchar_t buf[512];
                 swprintf_s(buf, L"%d / %d  已传输 %s / %s\n当前：%s",
@@ -113,6 +113,30 @@ namespace dirmv::gui
             }
             return 0;
         }
+        case WM_ERASEBKGND:
+        {
+            HDC dc = (HDC)wParam;
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            FillRect(dc, &rc, theme::CardBrush());
+            return 1;
+        }
+        case WM_CTLCOLORSTATIC:
+        {
+            HDC dc = (HDC)wParam;
+            HWND c = (HWND)lParam;
+            SetBkMode(dc, TRANSPARENT);
+            COLORREF clr = theme::TextSub;
+            HANDLE prop = GetPropW(c, L"dirmv_pd_clr");
+            if (prop)
+                clr = (COLORREF)((INT_PTR)prop - 1);
+            else if (GetDlgCtrlID(c) == ProgressDialog::IDC_PD_TEXT)
+                clr = theme::Text;
+            SetTextColor(dc, clr);
+            return (LRESULT)theme::CardBrush();
+        }
+        case WM_CTLCOLORBTN:
+            return (LRESULT)theme::CardBrush();
         case WM_CLOSE:
             g_cancelled = true;
             return 0;
@@ -130,7 +154,7 @@ namespace dirmv::gui
         wc.hInstance = hInst;
         wc.lpszClassName = L"dirMoverProgressWnd";
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hbrBackground = nullptr;
         RegisterClassExW(&wc);
     }
 
@@ -140,7 +164,7 @@ namespace dirmv::gui
             WS_EX_DLGMODALFRAME,
             L"dirMoverProgressWnd", title.c_str(),
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-            CW_USEDEFAULT, CW_USEDEFAULT, 480, 215,
+            CW_USEDEFAULT, CW_USEDEFAULT, theme::S(480), theme::S(240),
             parent, nullptr, nullptr, nullptr);
         if (!dlg)
             return nullptr;

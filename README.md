@@ -150,7 +150,7 @@ powershell -ExecutionPolicy Bypass -File test\run_all_tests.ps1
 | 套件                   | 文件                 | 说明                                                                           |
 | ---------------------- | -------------------- | ------------------------------------------------------------------------------ |
 | **CLI 全功能测试**     | `test\clitest.ps1`   | 用「测试规则文件」通过 `dirMover_cli.exe` 驱动，逐项验证 **19** 个功能点       |
-| **GUI 自动化冒烟测试** | `test\guitest.ps1`   | 启动真实 GUI 窗口，用 `EnumWindows/SendMessage` 驱动，验证界面可用（**9** 项） |
+| **GUI 冒烟测试**       | `test\guitest.ps1`   | 启动真实 GUI 窗口，用 `EnumWindows/SendMessage` 驱动：窗口、三个页签、页面容器、列表列数、页签切换、关闭到托盘等（**10** 项） |
 | **综合功能测试**       | `test\run_tests.ps1` | 原有全流程综合测试（**58** 项）                                                |
 | **迁移安全性测试**     | `test\safety_test.ps1` | 验证「绝不删除唯一副本」：占用不迁移、无残留、真 Junction、白名单命令（**32** 项） |
 
@@ -170,7 +170,7 @@ powershell -ExecutionPolicy Bypass -File test\run_all_tests.ps1
 
 CLI 套件覆盖：scan / migrate / restore / change-target / restore-excluded / adopt /
 rebuild / delete-rule / import / 占用检测 / 配置防篡改（HMAC 签名）等；
-GUI 套件覆盖：主窗口创建与标题、页签控件、规则列表（ListView）、按钮数量、关闭最小化到托盘等。
+GUI 套件覆盖：主窗口与标题、三个页签按钮、三个页面容器、规则列表 6 列、日志框、页签切换、服务状态文字、关闭后隐藏到托盘。
 综合套件覆盖：基本迁移、白名单、恢复、多规则、配置校验拒绝、目标已存在跳过、
 占用检测、原子性回滚、配置三处保存、更换目标目录、白名单还原、签名与篡改、扫描接管、
 外部链接提醒、新机器重建链接、配置分发、无效规则跳过、导入、贴近实际的测试目录全流程。
@@ -189,7 +189,7 @@ dotnet tool install --global wix --version 5.0.2
 powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
 
-产物：`installer\dist\dirMover-1.1.0.msi`
+产物：`installer\dist\dirMover-1.3.0.msi`
 
 安装包特性：
 
@@ -205,6 +205,14 @@ powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ## 使用
 
 ### 图形界面（分页：规则 / 计划 / 关于）
+
+1.3.0 起界面改为**现代扁平风格**：顶部为标题栏 + 分段式页签，内容为白色圆角卡片；主操作使用蓝色主按钮，危险操作（停止、删除）使用红色描边；全局使用 Microsoft YaHei UI 字体并按系统 DPI 缩放。
+
+![规则页](docs/screenshots/gui-rules.png)
+
+![计划页](docs/screenshots/gui-plan.png)
+
+![关于页](docs/screenshots/gui-about.png)
 
 以**管理员身份**运行 `dirMover.exe`：
 

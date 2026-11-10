@@ -2,6 +2,7 @@
 #include "gui/ProgressDialog.h"
 #include "gui/TrayIcon.h"
 #include "gui/App.h"
+#include "gui/Theme.h"
 #include "core/PathUtil.h"
 #include "core/Log.h"
 #include "core/MigrateEngine.h"
@@ -34,7 +35,7 @@ namespace dirmv::gui
         Config g_cfg;
         std::wstring g_iniPath;
 
-        HWND g_hTab = nullptr;
+        HWND g_hTabButtons[3] = {nullptr, nullptr, nullptr}; // 顶部标签按钮
         HWND g_hRuleList = nullptr;
         HWND g_hLog = nullptr;
         HWND g_hProgress = nullptr;
@@ -67,6 +68,7 @@ namespace dirmv::gui
         // 关于页控件
         HWND g_hAbout = nullptr;
         HWND g_hSvcState = nullptr;
+        COLORREF g_svcColor = theme::TextSub; // 服务状态文字颜色
 
         std::thread g_worker;
         std::atomic<bool> g_cancel{false};
@@ -85,6 +87,40 @@ namespace dirmv::gui
         {
             if (g_font)
                 SendMessageW(h, WM_SETFONT, (WPARAM)g_font, TRUE);
+        }
+
+        // 在父窗口绘制 1px 描边，包住无边框的子控件（输入框/列表框/列表视图）
+        void DrawChildFrame(HWND child, HDC dc, HWND parent)
+        {
+            if (!child || !IsWindowVisible(child))
+                return;
+            RECT r;
+            GetWindowRect(child, &r);
+            MapWindowPoints(HWND_DESKTOP, parent, (POINT *)&r, 2);
+            RECT parts[4] = {
+                {r.left - 1, r.top - 1, r.right + 1, r.top},
+                {r.left - 1, r.bottom, r.right + 1, r.bottom + 1},
+                {r.left - 1, r.top, r.left, r.bottom},
+                {r.right, r.top, r.right + 1, r.bottom}};
+            HBRUSH br = CreateSolidBrush(theme::BorderStrong);
+            for (auto &p : parts)
+                FillRect(dc, &p, br);
+            DeleteObject(br);
+        }
+
+        void FramePageFields(HWND page, HDC dc)
+        {
+            EnumChildWindows(
+                page,
+                [](HWND c, LPARAM l) -> BOOL
+                {
+                    wchar_t cls[64]{};
+                    GetClassNameW(c, cls, 64);
+                    if (lstrcmpiW(cls, L"Edit") == 0 || lstrcmpiW(cls, L"SysListView32") == 0)
+                        DrawChildFrame(c, (HDC)l, GetParent(c));
+                    return TRUE;
+                },
+                (LPARAM)dc);
         }
 
         void AppendLog(const std::wstring &line)
@@ -163,24 +199,23 @@ namespace dirmv::gui
                     {
                         c = (Ctx *)((CREATESTRUCTW *)lp)->lpCreateParams;
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
-                        HFONT f = g_font;
                         HWND bodyH = CreateWindowExW(0, L"STATIC", c->body->c_str(),
                                                      WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                                     16, 12, 424, 200, hwnd, nullptr, nullptr, nullptr);
-                        if (f)
-                            SendMessageW(bodyH, WM_SETFONT, (WPARAM)f, TRUE);
+                                                     theme::S(16), theme::S(12), theme::S(424),
+                                                     theme::S(200), hwnd, nullptr, nullptr, nullptr);
+                        theme::ApplyFont(bodyH, theme::FontBody());
+                        SetPropW(bodyH, L"dirmv_clr", (HANDLE)(INT_PTR)(theme::TextSub + 1));
                         int n = (int)c->labels->size();
                         int bw = 130, gap = 8;
                         int totalW = n * bw + (n - 1) * gap;
                         int x = (456 - totalW) / 2;
                         for (int i = 0; i < n; ++i)
                         {
-                            HWND b = CreateWindowExW(0, L"BUTTON", (*c->labels)[i].c_str(),
-                                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                                     x, 222, bw, 30, hwnd, (HMENU)(INT_PTR)(i + 1),
-                                                     nullptr, nullptr);
-                            if (f)
-                                SendMessageW(b, WM_SETFONT, (WPARAM)f, TRUE);
+                            theme::CreateButton(hwnd, i + 1, (*c->labels)[i],
+                                                i == 0 ? theme::BtnRole::BtnPrimary
+                                                       : theme::BtnRole::BtnDefault,
+                                                theme::S(x), theme::S(222), theme::S(bw),
+                                                theme::S(32));
                             x += bw + gap;
                         }
                         return 0;
@@ -199,15 +234,28 @@ namespace dirmv::gui
                         c->result = -1;
                         DestroyWindow(hwnd);
                         return 0;
+                    case WM_ERASEBKGND:
+                    {
+                        HDC dc = (HDC)wp;
+                        RECT rc;
+                        GetClientRect(hwnd, &rc);
+                        FillRect(dc, &rc, theme::CardBrush());
+                        return 1;
+                    }
                     case WM_CTLCOLORSTATIC:
-                        return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+                    {
+                        HDC dc = (HDC)wp;
+                        SetBkMode(dc, TRANSPARENT);
+                        SetTextColor(dc, theme::TextSub);
+                        return (LRESULT)theme::CardBrush();
+                    }
                     }
                     return DefWindowProcW(hwnd, msg, wp, lp);
                 };
                 wc.hInstance = g_hInst;
                 wc.lpszClassName = kCls;
                 wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-                wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+                wc.hbrBackground = nullptr;
                 RegisterClassExW(&wc);
                 registered = true;
             }
@@ -216,8 +264,9 @@ namespace dirmv::gui
             GetWindowRect(owner, &rc);
             HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, kCls, title ? title : L"请选择",
                                        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                                       rc.left + 80, rc.top + 60, 470, 300,
-                                       owner, nullptr, g_hInst, &ctx);
+                                       rc.left + theme::S(80), rc.top + theme::S(60),
+                                       theme::S(470), theme::S(300), owner, nullptr, g_hInst,
+                                       &ctx);
             EnableWindow(owner, FALSE);
             MSG msg{};
             while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -240,40 +289,42 @@ namespace dirmv::gui
         {
             if (g_hCheckImgs)
                 return;
-            g_hCheckImgs = ImageList_Create(16, 16, ILC_COLOR32 | ILC_MASK, 2, 0);
+            const int kIcon = theme::S(24);
+            const int kBox = theme::S(15);
+            g_hCheckImgs = ImageList_Create(kIcon, kIcon, ILC_COLOR32 | ILC_MASK, 2, 0);
             for (int checked = 0; checked < 2; ++checked)
             {
                 HDC hdc = GetDC(nullptr);
                 HDC mem = CreateCompatibleDC(hdc);
-                HBITMAP bmp = CreateCompatibleBitmap(hdc, 16, 16);
+                HBITMAP bmp = CreateCompatibleBitmap(hdc, kIcon, kIcon);
                 HBITMAP old = (HBITMAP)SelectObject(mem, bmp);
-                RECT rc{0, 0, 16, 16};
-                HBRUSH bg = CreateSolidBrush(GetSysColor(COLOR_WINDOW));
+                RECT rc{0, 0, kIcon, kIcon};
+                HBRUSH bg = CreateSolidBrush(theme::Card);
                 FillRect(mem, &rc, bg);
                 DeleteObject(bg);
-                // 画方框
-                HPEN pen = CreatePen(PS_SOLID, 1, RGB(120, 120, 120));
-                HPEN op = (HPEN)SelectObject(mem, pen);
-                HBRUSH br = (HBRUSH)GetStockObject(NULL_BRUSH);
-                HBRUSH ob = (HBRUSH)SelectObject(mem, br);
-                Rectangle(mem, 2, 2, 14, 14);
-                SelectObject(mem, ob);
-                SelectObject(mem, op);
-                DeleteObject(pen);
+
+                int bx = (kIcon - kBox) / 2;
+                int by = (kIcon - kBox) / 2;
+                RECT box{bx, by, bx + kBox, by + kBox};
                 if (checked)
                 {
-                    HPEN gp = CreatePen(PS_SOLID, 2, GetSysColor(COLOR_HIGHLIGHT));
+                    theme::RoundRectEx(mem, box, theme::S(4), theme::Accent, theme::Accent, 1);
+                    HPEN gp = CreatePen(PS_SOLID, theme::S(2), RGB(255, 255, 255));
                     HPEN ogp = (HPEN)SelectObject(mem, gp);
-                    MoveToEx(mem, 4, 8, nullptr);
-                    LineTo(mem, 7, 11);
-                    LineTo(mem, 12, 4);
+                    MoveToEx(mem, bx + theme::S(3), by + theme::S(8), nullptr);
+                    LineTo(mem, bx + theme::S(6), by + theme::S(11));
+                    LineTo(mem, bx + theme::S(12), by + theme::S(4));
                     SelectObject(mem, ogp);
                     DeleteObject(gp);
+                }
+                else
+                {
+                    theme::RoundRectEx(mem, box, theme::S(4), theme::Card, theme::BorderStrong, 1);
                 }
                 SelectObject(mem, old);
                 DeleteDC(mem);
                 ReleaseDC(nullptr, hdc);
-                ImageList_AddMasked(g_hCheckImgs, bmp, GetSysColor(COLOR_WINDOW));
+                ImageList_AddMasked(g_hCheckImgs, bmp, RGB(255, 255, 255));
                 DeleteObject(bmp);
             }
         }
@@ -513,31 +564,41 @@ namespace dirmv::gui
         {
             int st = ServiceInstaller::QueryState(L"dirMoverSvc");
             const wchar_t *txt = L"未知";
+            COLORREF color = theme::TextSub;
             switch (st)
             {
             case -2:
                 txt = L"未安装";
+                color = theme::TextSub;
                 break;
             case -1:
                 txt = L"无法查询（权限不足）";
+                color = theme::Warning;
                 break;
             case 0:
                 txt = L"已安装（已停止）";
+                color = theme::TextSub;
                 break;
             case 1:
                 txt = L"运行中";
+                color = theme::Success;
                 break;
             case 3:
                 txt = L"已暂停";
+                color = theme::Warning;
                 break;
             case 2:
                 txt = L"状态切换中";
+                color = theme::TextSub;
                 break;
             default:
                 txt = L"未知";
                 break;
             }
+            g_svcColor = color;
             SetWindowTextW(g_hSvcState, txt);
+            if (g_hSvcState)
+                InvalidateRect(g_hSvcState, nullptr, TRUE);
 
             // 按当前状态启用/禁用按钮，避免对 SCM 发起必然失败的操作
             HWND page = g_pageHwnd[PAGE_ABOUT];
@@ -621,57 +682,59 @@ namespace dirmv::gui
                     {
                         c = (DlgCtx *)((CREATESTRUCTW *)lp)->lpCreateParams;
                         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)c);
-                        HFONT f = g_font;
                         auto L = [&](const wchar_t *t, int x, int y, int w, int h)
                         {
                             HWND s = CreateWindowExW(0, L"STATIC", t, WS_CHILD | WS_VISIBLE,
-                                                     x, y, w, h, hwnd, nullptr, nullptr, nullptr);
-                            if (f)
-                                SendMessageW(s, WM_SETFONT, (WPARAM)f, TRUE);
+                                                     theme::S(x), theme::S(y), theme::S(w),
+                                                     theme::S(h), hwnd, nullptr, nullptr, nullptr);
+                            theme::ApplyFont(s, theme::FontBody());
+                            SetPropW(s, L"dirmv_clr", (HANDLE)(INT_PTR)(theme::TextSub + 1));
                             return s;
                         };
                         auto E = [&](int id, const std::wstring &t, int x, int y, int w, int h, bool ro)
                         {
-                            HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", t.c_str(),
-                                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | (ro ? ES_READONLY : 0),
-                                                     x, y, w, h, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
-                            if (f)
-                                SendMessageW(e, WM_SETFONT, (WPARAM)f, TRUE);
+                            HWND e = CreateWindowExW(0, L"EDIT", t.c_str(),
+                                                     WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL |
+                                                         (ro ? ES_READONLY : 0),
+                                                     theme::S(x), theme::S(y), theme::S(w),
+                                                     theme::S(h), hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
+                            theme::ApplyFont(e, theme::FontBody());
                             return e;
                         };
-                        auto B = [&](int id, const wchar_t *t, int x, int y, int w, int h)
+                        auto B = [&](int id, const wchar_t *t, int x, int y, int w, int h,
+                                     theme::BtnRole role)
                         {
-                            HWND b = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                                     x, y, w, h, hwnd, (HMENU)(INT_PTR)id, nullptr, nullptr);
-                            if (f)
-                                SendMessageW(b, WM_SETFONT, (WPARAM)f, TRUE);
-                            return b;
+                            return theme::CreateButton(hwnd, id, t, role, theme::S(x), theme::S(y),
+                                                       theme::S(w), theme::S(h));
                         };
 
                         L(L"监视目录：", 12, 15, 70, 20);
-                        E(1, c->rule->watchDir, 86, 12, 330, 24, !c->isNew);
+                        E(1, c->rule->watchDir, 86, 12, 330, 26, !c->isNew);
                         if (c->isNew)
-                            B(101, L"浏览…", 420, 12, 60, 24);
+                            B(101, L"浏览…", 420, 12, 64, 26, theme::BtnRole::BtnGhost);
 
-                        L(L"目标目录：", 12, 47, 70, 20);
-                        E(2, c->rule->targetDir, 86, 44, 330, 24, false);
-                        B(102, L"浏览…", 420, 44, 60, 24);
+                        L(L"目标目录：", 12, 49, 70, 20);
+                        E(2, c->rule->targetDir, 86, 46, 330, 26, false);
+                        B(102, L"浏览…", 420, 46, 64, 26, theme::BtnRole::BtnGhost);
 
-                        L(L"点击条目可在两栏间移动（右侧为白名单，不被迁移）：", 12, 78, 400, 20);
-                        L(L"非白名单（会迁移）", 12, 100, 180, 18);
-                        L(L"白名单（不迁移）", 258, 100, 180, 18);
+                        L(L"点击条目可在两栏间移动（右侧为白名单，不被迁移）：", 12, 84, 400, 20);
+                        L(L"非白名单（会迁移）", 12, 108, 180, 18);
+                        L(L"白名单（不迁移）", 258, 108, 180, 18);
 
-                        HWND lstAll = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
-                                                      12, 120, 230, 190, hwnd, (HMENU)(INT_PTR)3, nullptr, nullptr);
-                        HWND lstExcl = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                                       WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
-                                                       258, 120, 230, 190, hwnd, (HMENU)(INT_PTR)4, nullptr, nullptr);
-                        if (f)
-                        {
-                            SendMessageW(lstAll, WM_SETFONT, (WPARAM)f, TRUE);
-                            SendMessageW(lstExcl, WM_SETFONT, (WPARAM)f, TRUE);
-                        }
+                        HWND lstAll = CreateWindowExW(0, L"LISTBOX", L"",
+                                                      WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                                                          LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+                                                      theme::S(12), theme::S(128), theme::S(230),
+                                                      theme::S(176), hwnd, (HMENU)(INT_PTR)3,
+                                                      nullptr, nullptr);
+                        HWND lstExcl = CreateWindowExW(0, L"LISTBOX", L"",
+                                                       WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                                                           LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
+                                                       theme::S(258), theme::S(128), theme::S(230),
+                                                       theme::S(176), hwnd, (HMENU)(INT_PTR)4,
+                                                       nullptr, nullptr);
+                        theme::ApplyFont(lstAll, theme::FontBody());
+                        theme::ApplyFont(lstExcl, theme::FontBody());
 
                         // 填充：左 = 监视目录下一级子目录/链接（排除已在白名单中的），右 = 白名单
                         if (!c->rule->watchDir.empty() && Path::DirectoryExists(c->rule->watchDir))
@@ -693,8 +756,8 @@ namespace dirmv::gui
                         for (auto &e : c->rule->exclude)
                             SendMessageW(lstExcl, LB_ADDSTRING, 0, (LPARAM)e.c_str());
 
-                        B(IDOK, L"保存", 320, 320, 76, 28);
-                        B(IDCANCEL, L"取消", 404, 320, 76, 28);
+                        B(IDOK, L"保存", 336, 316, 76, 30, theme::BtnRole::BtnPrimary);
+                        B(IDCANCEL, L"取消", 420, 316, 76, 30, theme::BtnRole::BtnDefault);
                         return 0;
                     }
                     case WM_COMMAND:
@@ -857,15 +920,52 @@ namespace dirmv::gui
                         DestroyWindow(hwnd);
                         return 0;
                     }
+                    case WM_ERASEBKGND:
+                        return 1;
+                    case WM_PAINT:
+                    {
+                        PAINTSTRUCT ps;
+                        HDC dc = BeginPaint(hwnd, &ps);
+                        RECT rc;
+                        GetClientRect(hwnd, &rc);
+                        FillRect(dc, &rc, theme::CardBrush());
+                        HWND fields[] = {GetDlgItem(hwnd, 1), GetDlgItem(hwnd, 2),
+                                         GetDlgItem(hwnd, 3), GetDlgItem(hwnd, 4)};
+                        for (HWND f : fields)
+                            DrawChildFrame(f, dc, hwnd);
+                        EndPaint(hwnd, &ps);
+                        return 0;
+                    }
+                    case WM_CTLCOLORDLG:
+                        return (LRESULT)theme::CardBrush();
+                    case WM_CTLCOLORLISTBOX:
+                    {
+                        HDC dc = (HDC)wp;
+                        SetBkColor(dc, theme::InputBg);
+                        SetTextColor(dc, theme::Text);
+                        return (LRESULT)theme::InputBrush();
+                    }
+                    case WM_CTLCOLOREDIT:
+                    {
+                        HDC dc = (HDC)wp;
+                        SetBkColor(dc, theme::InputBg);
+                        SetTextColor(dc, theme::Text);
+                        return (LRESULT)theme::InputBrush();
+                    }
                     case WM_CTLCOLORSTATIC:
-                        return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+                    {
+                        HDC dc = (HDC)wp;
+                        SetBkMode(dc, TRANSPARENT);
+                        SetTextColor(dc, theme::TextSub);
+                        return (LRESULT)theme::CardBrush();
+                    }
                     }
                     return DefWindowProcW(hwnd, msg, wp, lp);
                 };
                 wc.hInstance = g_hInst;
                 wc.lpszClassName = kCls;
                 wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-                wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+                wc.hbrBackground = nullptr;
                 RegisterClassExW(&wc);
                 registered = true;
             }
@@ -875,8 +975,9 @@ namespace dirmv::gui
             HWND dlg = CreateWindowExW(WS_EX_DLGMODALFRAME, kCls,
                                        isNew ? L"新建规则" : L"修改规则",
                                        WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                                       rc.left + 60, rc.top + 40, 500, 395,
-                                       owner, nullptr, g_hInst, &ctx);
+                                       rc.left + theme::S(60), rc.top + theme::S(40),
+                                       theme::S(512), theme::S(392), owner, nullptr, g_hInst,
+                                       &ctx);
             EnableWindow(owner, FALSE);
             MSG msg{};
             while (IsWindow(dlg) && GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -1680,147 +1781,167 @@ namespace dirmv::gui
         // ==================== 分页与控件布局 ====================
         void ShowPage(int page);
 
+        // 布局常量（DIP，实际绘制统一用 theme::S 缩放）
+        const int kHeaderH = 92;
+        const int kCardX = 20;
+        const int kCardTop = 100;
+        const int kTabCount = 3;
+        const int kTabW = 86;
+        const int kTabH = 34;
+        const int kTabGap = 4;
+        const int kSegPad = 3;
+        constexpr int kTabIds[kTabCount] = {2001, 2002, 2003};
+
+        void SetLabelColor(HWND h, COLORREF c)
+        {
+            SetPropW(h, L"dirmv_clr", (HANDLE)(INT_PTR)(c + 1));
+        }
+
+        HWND MakeLabel(HWND parent, const wchar_t *text, int x, int y, int w, int h, HFONT font,
+                       COLORREF color)
+        {
+            HWND hwnd = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                        theme::S(x), theme::S(y), theme::S(w), theme::S(h), parent,
+                                        nullptr, g_hInst, nullptr);
+            theme::ApplyFont(hwnd, font);
+            SetLabelColor(hwnd, color);
+            return hwnd;
+        }
+
+        HWND MakeEdit(HWND parent, int id, const wchar_t *text, int x, int y, int w, int h)
+        {
+            HWND e = CreateWindowExW(0, L"EDIT", text,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                                     theme::S(x), theme::S(y), theme::S(w), theme::S(h), parent,
+                                     (HMENU)(INT_PTR)id, g_hInst, nullptr);
+            theme::ApplyFont(e, theme::FontBody());
+            SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                         MAKELPARAM(theme::S(8), theme::S(8)));
+            return e;
+        }
+
+        HWND MakeCombo(HWND parent, int id, int x, int y, int w, int h)
+        {
+            HWND c = CreateWindowExW(0, L"COMBOBOX", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST |
+                                         WS_VSCROLL,
+                                     theme::S(x), theme::S(y), theme::S(w), theme::S(h), parent,
+                                     (HMENU)(INT_PTR)id, g_hInst, nullptr);
+            theme::ApplyFont(c, theme::FontBody());
+            return c;
+        }
+
+        HWND MakeCheck(HWND parent, int id, const wchar_t *text, int x, int y, int w, int h)
+        {
+            HWND c = CreateWindowExW(0, L"BUTTON", text,
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                     theme::S(x), theme::S(y), theme::S(w), theme::S(h), parent,
+                                     (HMENU)(INT_PTR)id, g_hInst, nullptr);
+            theme::ApplyFont(c, theme::FontBody());
+            return c;
+        }
+
         void BuildRulePage(HWND parent)
         {
-            int y = 8;
-            HWND lbl = CreateWindowExW(0, L"STATIC", L"规则列表（每条规则：监视目录 → 目标目录）",
-                                       WS_CHILD | WS_VISIBLE, 10, y, 420, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(lbl);
-            y += 22;
+            MakeLabel(parent, L"迁移规则", 0, 22, 400, 28, theme::FontH2(), theme::Text);
+            MakeLabel(parent, L"监视目录中的非白名单内容会迁移到目标目录，原位置自动建立链接", 0, 54,
+                      640, 20, theme::FontSmall(), theme::TextSub);
 
-            // 列表上方：仅「新建规则 / 导入规则」
-            {
-                struct
-                {
-                    int id;
-                    const wchar_t *text;
-                    int w;
-                } top[] = {
-                    {MainWindow::IDC_BTN_ADD_RULE, L"新建规则…", 100},
-                    {MainWindow::IDC_BTN_IMPORT, L"导入规则…", 100},
-                };
-                int bx = 10;
-                for (auto &b : top)
-                {
-                    HWND h = CreateWindowExW(0, L"BUTTON", b.text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                             bx, y, b.w, 28, parent, (HMENU)(INT_PTR)b.id, g_hInst, nullptr);
-                    SetFont(h);
-                    bx += b.w + 6;
-                }
-                y += 34;
-            }
+            theme::CreateButton(parent, MainWindow::IDC_BTN_ADD_RULE, L"新建规则",
+                                theme::BtnRole::BtnPrimary, theme::S(0), theme::S(84), theme::S(104),
+                                theme::S(34));
+            theme::CreateButton(parent, MainWindow::IDC_BTN_IMPORT, L"导入规则",
+                                theme::BtnRole::BtnDefault, theme::S(112), theme::S(84), theme::S(104),
+                                theme::S(34));
 
-            EnsureCheckImages();
-            g_hRuleList = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                                          WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL,
-                                          10, y, 700, 150, parent, (HMENU)(INT_PTR)MainWindow::IDC_RULE_LIST, g_hInst, nullptr);
-            SetFont(g_hRuleList);
-            ListView_SetExtendedListViewStyle(g_hRuleList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER);
+            const int kCols[6] = {36, 248, 236, 62, 110, 88};
+            g_hRuleList = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                          WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT |
+                                              LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                          theme::S(0), theme::S(132), theme::S(792), theme::S(188),
+                                          parent, (HMENU)(INT_PTR)MainWindow::IDC_RULE_LIST,
+                                          g_hInst, nullptr);
+            ListView_SetExtendedListViewStyle(g_hRuleList,
+                                              LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
             ListView_SetImageList(g_hRuleList, g_hCheckImgs, LVSIL_SMALL);
+            theme::ApplyFont(g_hRuleList, theme::FontBody());
+            if (HWND hdr = ListView_GetHeader(g_hRuleList))
+                theme::ApplyFont(hdr, theme::FontSmall());
+
+            const wchar_t *heads[6] = {L"", L"监视目录", L"目标目录", L"白名单", L"状态", L"操作"};
+            for (int i = 0; i < 6; ++i)
             {
                 LVCOLUMNW col{};
-                col.mask = LVCF_TEXT | LVCF_WIDTH;
-                col.pszText = const_cast<LPWSTR>(L""); // 复选框列（表头为全选框）
-                col.cx = 28;
-                ListView_InsertColumn(g_hRuleList, 0, &col);
-                col.pszText = const_cast<LPWSTR>(L"监视目录");
-                col.cx = 220;
-                ListView_InsertColumn(g_hRuleList, 1, &col);
-                col.pszText = const_cast<LPWSTR>(L"目标目录");
-                col.cx = 200;
-                ListView_InsertColumn(g_hRuleList, 2, &col);
-                col.pszText = const_cast<LPWSTR>(L"白名单");
-                col.cx = 60;
-                ListView_InsertColumn(g_hRuleList, 3, &col);
-                col.pszText = const_cast<LPWSTR>(L"状态");
-                col.cx = 110;
-                ListView_InsertColumn(g_hRuleList, 4, &col);
-                col.pszText = const_cast<LPWSTR>(L"操作");
-                col.cx = 70;
-                ListView_InsertColumn(g_hRuleList, 5, &col);
+                col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+                col.pszText = (LPWSTR)heads[i];
+                col.cx = theme::S(kCols[i]);
+                col.fmt = (i == 0 || i == 3) ? LVCFMT_CENTER : LVCFMT_LEFT;
+                ListView_InsertColumn(g_hRuleList, i, &col);
             }
-            y += 160;
 
-            // 列表下方第一行：规则编辑类操作（作用于规则本身）
+            MakeLabel(parent, L"规则操作", 0, 332, 200, 20, theme::FontSmall(), theme::TextMuted);
+            theme::CreateButton(parent, MainWindow::IDC_BTN_ENABLE_RULE, L"启用",
+                                theme::BtnRole::BtnDefault, theme::S(0), theme::S(352), theme::S(72),
+                                theme::S(32));
+            theme::CreateButton(parent, MainWindow::IDC_BTN_DISABLE_RULE, L"停用",
+                                theme::BtnRole::BtnDefault, theme::S(80), theme::S(352), theme::S(72),
+                                theme::S(32));
+            theme::CreateButton(parent, MainWindow::IDC_BTN_DELETE_RULE, L"删除规则",
+                                theme::BtnRole::BtnDanger, theme::S(160), theme::S(352), theme::S(92),
+                                theme::S(32));
+
+            MakeLabel(parent, L"任务", 0, 398, 200, 20, theme::FontSmall(), theme::TextMuted);
+            const struct
             {
-                struct
-                {
-                    int id;
-                    const wchar_t *text;
-                    int w;
-                } editRow[] = {
-                    {MainWindow::IDC_BTN_ENABLE_RULE, L"启用", 70},
-                    {MainWindow::IDC_BTN_DISABLE_RULE, L"停用", 70},
-                    {MainWindow::IDC_BTN_DELETE_RULE, L"删除规则", 90},
-                };
-                HWND hint = CreateWindowExW(0, L"STATIC", L"规则编辑：",
-                                            WS_CHILD | WS_VISIBLE, 10, y + 5, 80, 20, parent, nullptr, g_hInst, nullptr);
-                SetFont(hint);
-                int bx = 96;
-                for (auto &b : editRow)
-                {
-                    HWND h = CreateWindowExW(0, L"BUTTON", b.text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                             bx, y, b.w, 28, parent, (HMENU)(INT_PTR)b.id, g_hInst, nullptr);
-                    SetFont(h);
-                    bx += b.w + 6;
-                }
-            }
-            y += 34;
-
-            // 列表下方第二行：任务类操作（作用于选中/勾选规则）
+                int id;
+                const wchar_t *text;
+                theme::BtnRole role;
+                int w;
+            } actions[] = {
+                {MainWindow::IDC_BTN_ADOPT, L"扫描已有迁移…", theme::BtnRole::BtnDefault, 124},
+                {MainWindow::IDC_BTN_REBUILD, L"重建链接…", theme::BtnRole::BtnDefault, 108},
+                {MainWindow::IDC_BTN_MIGRATE_RULE, L"开始迁移", theme::BtnRole::BtnPrimary, 96},
+                {MainWindow::IDC_BTN_RESTORE_RULE, L"恢复", theme::BtnRole::BtnDefault, 72},
+                {MainWindow::IDC_BTN_STOP, L"停止", theme::BtnRole::BtnDanger, 72},
+            };
+            int x = 0;
+            for (const auto &a : actions)
             {
-                struct
-                {
-                    int id;
-                    const wchar_t *text;
-                    int w;
-                } taskRow[] = {
-                    {MainWindow::IDC_BTN_ADOPT, L"扫描已有迁移…", 118},
-                    {MainWindow::IDC_BTN_REBUILD, L"重建链接…", 100},
-                    {MainWindow::IDC_BTN_MIGRATE_RULE, L"开始迁移", 90},
-                    {MainWindow::IDC_BTN_RESTORE_RULE, L"恢复", 70},
-                    {MainWindow::IDC_BTN_STOP, L"停止", 70},
-                };
-                HWND hint = CreateWindowExW(0, L"STATIC", L"任务操作：",
-                                            WS_CHILD | WS_VISIBLE, 10, y + 5, 80, 20, parent, nullptr, g_hInst, nullptr);
-                SetFont(hint);
-                int bx = 96;
-                for (auto &b : taskRow)
-                {
-                    HWND h = CreateWindowExW(0, L"BUTTON", b.text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                             bx, y, b.w, 28, parent, (HMENU)(INT_PTR)b.id, g_hInst, nullptr);
-                    SetFont(h);
-                    bx += b.w + 6;
-                }
+                theme::CreateButton(parent, a.id, a.text, a.role, theme::S(x), theme::S(418),
+                                    theme::S(a.w), theme::S(32));
+                x += a.w + 8;
             }
-            y += 34;
 
-            // 进度 + 日志（规则页也显示前台进度）
-            g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
-                                          WS_CHILD | WS_VISIBLE | PBS_SMOOTH, 10, y, 560, 22, parent,
-                                          (HMENU)(INT_PTR)MainWindow::IDC_PROGRESS, g_hInst, nullptr);
-            SendMessageW(g_hProgress, PBM_SETRANGE, 0, MAKELPARAM(0, 1000));
-            g_hEta = CreateWindowExW(0, L"STATIC", L"就绪", WS_CHILD | WS_VISIBLE,
-                                     580, y + 3, 130, 20, parent, (HMENU)(INT_PTR)MainWindow::IDC_ETA, g_hInst, nullptr);
-            SetFont(g_hEta);
-            y += 30;
+            g_hProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE,
+                                          theme::S(0), theme::S(470), theme::S(620), theme::S(8),
+                                          parent, (HMENU)(INT_PTR)MainWindow::IDC_PROGRESS,
+                                          g_hInst, nullptr);
+            SendMessageW(g_hProgress, PBM_SETBKCOLOR, 0, (LPARAM)theme::SegBg);
+            SendMessageW(g_hProgress, PBM_SETBARCOLOR, 0, (LPARAM)theme::Accent);
 
-            g_hLog = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                     WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
-                                     10, y, 700, 120, parent, (HMENU)(INT_PTR)MainWindow::IDC_LOG, g_hInst, nullptr);
-            SetFont(g_hLog);
+            g_hEta = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                     theme::S(632), theme::S(462), theme::S(160), theme::S(20),
+                                     parent, (HMENU)(INT_PTR)MainWindow::IDC_ETA, g_hInst,
+                                     nullptr);
+            theme::ApplyFont(g_hEta, theme::FontSmall());
+            SetLabelColor(g_hEta, theme::TextMuted);
+
+            g_hLog = CreateWindowExW(0, L"EDIT", L"",
+                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
+                                         ES_READONLY | ES_AUTOVSCROLL | ES_NOHIDESEL,
+                                     theme::S(0), theme::S(494), theme::S(792), theme::S(94), parent,
+                                     (HMENU)(INT_PTR)MainWindow::IDC_LOG, g_hInst, nullptr);
+            theme::ApplyFont(g_hLog, theme::FontMono());
         }
 
         void BuildPlanPage(HWND parent)
         {
-            int y = 12, lh = 24;
-            HWND l;
-            l = CreateWindowExW(0, L"STATIC", L"定时间隔：", WS_CHILD | WS_VISIBLE, 12, y + 3, 70, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(l);
-            g_hSchedPeriod = CreateWindowExW(0, L"COMBOBOX", L"",
-                                             WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 90, y, 120, 200,
-                                             parent, (HMENU)(INT_PTR)MainWindow::IDC_SCHED_PERIOD, g_hInst, nullptr);
-            SetFont(g_hSchedPeriod);
+            MakeLabel(parent, L"自动迁移", 0, 22, 400, 28, theme::FontH2(), theme::Text);
+            MakeLabel(parent, L"按计划定时扫描已启用的规则并自动迁移新目录", 0, 54, 640, 20,
+                      theme::FontSmall(), theme::TextSub);
+
+            MakeLabel(parent, L"定时间隔", 0, 92, 64, 20, theme::FontBody(), theme::Text);
+            g_hSchedPeriod = MakeCombo(parent, MainWindow::IDC_SCHED_PERIOD, 72, 86, 104, 200);
             SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"不定时");
             SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每天");
             SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每周");
@@ -1828,27 +1949,15 @@ namespace dirmv::gui
             SendMessageW(g_hSchedPeriod, CB_ADDSTRING, 0, (LPARAM)L"每N天");
             SendMessageW(g_hSchedPeriod, CB_SETCURSEL, 0, 0);
 
-            // 时刻（每天/每周/每月/每N天 都显示；不定时隐藏）
-            g_hSchedTimeLabel = CreateWindowExW(0, L"STATIC", L"时刻：", WS_CHILD | WS_VISIBLE, 230, y + 3, 40, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(g_hSchedTimeLabel);
-            g_hSchedHour = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"2",
-                                           WS_CHILD | WS_VISIBLE | ES_NUMBER, 272, y, 40, lh, parent,
-                                           (HMENU)(INT_PTR)MainWindow::IDC_SCHED_HOUR, g_hInst, nullptr);
-            SetFont(g_hSchedHour);
-            g_hSchedColon = CreateWindowExW(0, L"STATIC", L":", WS_CHILD | WS_VISIBLE, 316, y + 3, 10, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(g_hSchedColon);
-            g_hSchedMin = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"0",
-                                          WS_CHILD | WS_VISIBLE | ES_NUMBER, 326, y, 40, lh, parent,
-                                          (HMENU)(INT_PTR)MainWindow::IDC_SCHED_MIN, g_hInst, nullptr);
-            SetFont(g_hSchedMin);
+            g_hSchedTimeLabel = MakeLabel(parent, L"时刻", 190, 92, 40, 20, theme::FontBody(),
+                                          theme::Text);
+            g_hSchedHour = MakeEdit(parent, MainWindow::IDC_SCHED_HOUR, L"2", 232, 86, 44, 30);
+            g_hSchedColon = MakeLabel(parent, L":", 280, 92, 10, 20, theme::FontBody(), theme::Text);
+            g_hSchedMin = MakeEdit(parent, MainWindow::IDC_SCHED_MIN, L"0", 294, 86, 44, 30);
 
-            // 每周：用下拉选择周几（默认周一）
-            g_hSchedWeekLabel = CreateWindowExW(0, L"STATIC", L"周几：", WS_CHILD | WS_VISIBLE, 380, y + 3, 40, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(g_hSchedWeekLabel);
-            g_hSchedWeekCombo = CreateWindowExW(0, L"COMBOBOX", L"",
-                                                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 422, y, 90, 200,
-                                                parent, (HMENU)(INT_PTR)MainWindow::IDC_SCHED_WEEK, g_hInst, nullptr);
-            SetFont(g_hSchedWeekCombo);
+            g_hSchedWeekLabel = MakeLabel(parent, L"周几", 350, 92, 40, 20, theme::FontBody(),
+                                          theme::Text);
+            g_hSchedWeekCombo = MakeCombo(parent, MainWindow::IDC_SCHED_WEEK, 392, 86, 88, 200);
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周日");
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周一");
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周二");
@@ -1856,137 +1965,110 @@ namespace dirmv::gui
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周四");
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周五");
             SendMessageW(g_hSchedWeekCombo, CB_ADDSTRING, 0, (LPARAM)L"周六");
-            SendMessageW(g_hSchedWeekCombo, CB_SETCURSEL, 1, 0); // 周一
+            SendMessageW(g_hSchedWeekCombo, CB_SETCURSEL, 1, 0);
 
-            // 每月：几号
-            g_hSchedDomLabel = CreateWindowExW(0, L"STATIC", L"每月几号：", WS_CHILD | WS_VISIBLE, 522, y + 3, 64, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(g_hSchedDomLabel);
-            g_hSchedDom = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"1",
-                                          WS_CHILD | WS_VISIBLE | ES_NUMBER, 590, y, 40, lh, parent,
-                                          (HMENU)(INT_PTR)MainWindow::IDC_SCHED_DOM, g_hInst, nullptr);
-            SetFont(g_hSchedDom);
+            g_hSchedDomLabel = MakeLabel(parent, L"每月几号", 490, 92, 64, 20, theme::FontBody(),
+                                         theme::Text);
+            g_hSchedDom = MakeEdit(parent, MainWindow::IDC_SCHED_DOM, L"1", 556, 86, 44, 30);
 
-            // 每N天：每几天
-            g_hSchedNDaysLabel = CreateWindowExW(0, L"STATIC", L"每几天：", WS_CHILD | WS_VISIBLE, 640, y + 3, 56, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(g_hSchedNDaysLabel);
-            g_hSchedNDays = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"3",
-                                            WS_CHILD | WS_VISIBLE | ES_NUMBER, 700, y, 40, lh, parent,
-                                            (HMENU)(INT_PTR)MainWindow::IDC_SCHED_N, g_hInst, nullptr);
-            SetFont(g_hSchedNDays);
+            g_hSchedNDaysLabel = MakeLabel(parent, L"每几天", 490, 92, 56, 20, theme::FontBody(),
+                                           theme::Text);
+            g_hSchedNDays = MakeEdit(parent, MainWindow::IDC_SCHED_N, L"3", 550, 86, 44, 30);
 
-            y += 30;
             g_hSchedNext = CreateWindowExW(0, L"STATIC", L"下次运行：未启用定时",
-                                           WS_CHILD | WS_VISIBLE, 12, y, 460, 20, parent,
-                                           (HMENU)(INT_PTR)MainWindow::IDC_SCHED_NEXT, g_hInst, nullptr);
-            SetFont(g_hSchedNext);
-            y += 30;
+                                           WS_CHILD | WS_VISIBLE | SS_LEFT, theme::S(0),
+                                           theme::S(126), theme::S(600), theme::S(20), parent,
+                                           (HMENU)(INT_PTR)MainWindow::IDC_SCHED_NEXT, g_hInst,
+                                           nullptr);
+            theme::ApplyFont(g_hSchedNext, theme::FontSmall());
+            SetLabelColor(g_hSchedNext, theme::TextMuted);
 
-            l = CreateWindowExW(0, L"STATIC", L"线程数：", WS_CHILD | WS_VISIBLE, 12, y + 3, 60, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(l);
-            g_hThreads = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"4",
-                                         WS_CHILD | WS_VISIBLE | ES_NUMBER, 74, y, 50, lh, parent,
-                                         (HMENU)(INT_PTR)MainWindow::IDC_THREADS, g_hInst, nullptr);
-            SetFont(g_hThreads);
+            MakeLabel(parent, L"运行参数", 0, 170, 300, 28, theme::FontH2(), theme::Text);
 
-            l = CreateWindowExW(0, L"STATIC", L"链接类型：", WS_CHILD | WS_VISIBLE, 140, y + 3, 62, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(l);
-            g_hLinkType = CreateWindowExW(0, L"COMBOBOX", L"",
-                                          WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 204, y, 150, 120,
-                                          parent, (HMENU)(INT_PTR)MainWindow::IDC_LINKTYPE, g_hInst, nullptr);
-            SetFont(g_hLinkType);
+            MakeLabel(parent, L"线程数", 0, 210, 52, 20, theme::FontBody(), theme::Text);
+            g_hThreads = MakeEdit(parent, MainWindow::IDC_THREADS, L"4", 56, 204, 64, 30);
+            MakeLabel(parent, L"链接类型", 148, 210, 64, 20, theme::FontBody(), theme::Text);
+            g_hLinkType = MakeCombo(parent, MainWindow::IDC_LINKTYPE, 216, 204, 180, 120);
             SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)L"符号链接(需管理员)");
             SendMessageW(g_hLinkType, CB_ADDSTRING, 0, (LPARAM)L"目录联接(Junction)");
             SendMessageW(g_hLinkType, CB_SETCURSEL, 0, 0);
-            y += 30;
 
-            g_hMoveMode = CreateWindowExW(0, L"BUTTON", L"移动模式(迁移后删源)",
-                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 12, y, 190, 22, parent,
-                                          (HMENU)(INT_PTR)MainWindow::IDC_MOVEMODE, g_hInst, nullptr);
-            SetFont(g_hMoveMode);
+            g_hMoveMode = MakeCheck(parent, MainWindow::IDC_MOVEMODE, L"移动模式（迁移后删源）", 0,
+                                    248, 190, 24);
             SendMessageW(g_hMoveMode, BM_SETCHECK, BST_CHECKED, 0);
-            g_hWatcher = CreateWindowExW(0, L"BUTTON", L"启用实时监视(新目录立即迁移)",
-                                         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 210, y, 250, 22, parent,
-                                         (HMENU)(INT_PTR)MainWindow::IDC_WATCHER, g_hInst, nullptr);
-            SetFont(g_hWatcher);
+            g_hWatcher = MakeCheck(parent, MainWindow::IDC_WATCHER, L"启用实时监视", 210, 248, 160,
+                                   24);
             SendMessageW(g_hWatcher, BM_SETCHECK, BST_CHECKED, 0);
-            y += 28;
 
-            g_hLockDetect = CreateWindowExW(0, L"BUTTON", L"检测文件占用并自动重试",
-                                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 12, y, 200, 22, parent,
-                                            (HMENU)(INT_PTR)MainWindow::IDC_LOCKDETECT, g_hInst, nullptr);
-            SetFont(g_hLockDetect);
+            g_hLockDetect = MakeCheck(parent, MainWindow::IDC_LOCKDETECT, L"检测文件占用", 0, 284,
+                                      150, 24);
             SendMessageW(g_hLockDetect, BM_SETCHECK, BST_CHECKED, 0);
-            l = CreateWindowExW(0, L"STATIC", L"重试(分钟)：", WS_CHILD | WS_VISIBLE, 218, y + 3, 66, 20, parent, nullptr, g_hInst, nullptr);
-            SetFont(l);
-            g_hRetryMin = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"5",
-                                          WS_CHILD | WS_VISIBLE | ES_NUMBER, 286, y, 50, lh, parent,
-                                          (HMENU)(INT_PTR)MainWindow::IDC_RETRYMIN, g_hInst, nullptr);
-            SetFont(g_hRetryMin);
-            y += 36;
+            MakeLabel(parent, L"重试间隔（分钟）", 160, 290, 110, 20, theme::FontBody(),
+                      theme::Text);
+            g_hRetryMin = MakeEdit(parent, MainWindow::IDC_RETRYMIN, L"5", 276, 284, 64, 30);
 
-            HWND save = CreateWindowExW(0, L"BUTTON", L"保存计划设置",
-                                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 12, y, 130, 28, parent,
-                                        (HMENU)(INT_PTR)MainWindow::IDC_BTN_SAVE_PLAN, g_hInst, nullptr);
-            SetFont(save);
-            y += 40;
+            theme::CreateButton(parent, MainWindow::IDC_BTN_SAVE_PLAN, L"保存计划设置",
+                                theme::BtnRole::BtnPrimary, theme::S(0), theme::S(334), theme::S(140),
+                                theme::S(34));
 
-            l = CreateWindowExW(0, L"STATIC",
-                                L"说明：\r\n"
-                                L"  · 定时为「固定周期 + 固定时刻」；「不定时」则仅靠实时监视与手动迁移。\r\n"
-                                L"  · 只有「已启用的规则」才会被自动迁移、定时迁移与实时监视（hook）使用。",
-                                WS_CHILD | WS_VISIBLE, 12, y, 700, 56, parent, nullptr, g_hInst, nullptr);
-            SetFont(l);
+            MakeLabel(parent,
+                      L"说明：\r\n"
+                      L"· 定时 = 固定周期 + 固定时刻；「不定时」则只依赖实时监视与手动迁移\r\n"
+                      L"· 只有已启用的规则才会被自动迁移、定时迁移与实时监视使用",
+                      0, 390, 700, 60, theme::FontSmall(), theme::TextSub);
         }
 
         void BuildAboutPage(HWND parent)
         {
-            std::wstring aboutText =
-                L"dirMover - 目录软链接迁移/恢复工具\r\n版本 " + GetAppVersion() +
-                L"\r\n\r\n"
-                L"功能：\r\n"
-                L"  · 将监视目录中的非白名单目录迁移到目标目录并创建链接\r\n"
-                L"  · 支持符号链接 / 目录联接（Junction）\r\n"
-                L"  · 实时监视 + 定时（周期 + 时刻）自动迁移\r\n"
-                L"  · 文件占用检测（RestartManager）与一次性重试\r\n"
-                L"  · 迁移崩溃残留自愈（.dirmv-moving / .dirmv-old）\r\n"
-                L"  · 每规则独立白名单；配置保存于监视/目标/应用三处\r\n\r\n"
-                L"后台服务（开机自启动）：\r\n";
+            MakeLabel(parent, L"dirMover", 0, 14, 400, 40, theme::FontApp(), theme::Text);
+            std::wstring ver = L"版本 " + GetAppVersion();
+            g_hAbout = MakeLabel(parent, ver.c_str(), 2, 58, 300, 20, theme::FontSmall(),
+                                 theme::TextMuted);
 
-            HWND t = CreateWindowExW(0, L"STATIC", aboutText.c_str(),
-                                     WS_CHILD | WS_VISIBLE | SS_LEFT, 12, 12, 720, 220, parent, nullptr, g_hInst, nullptr);
-            SetFont(t);
+            MakeLabel(parent,
+                      L"· 将监视目录中的非白名单内容迁移到目标目录，原位置保留链接\r\n"
+                      L"· 支持符号链接与目录联接（Junction）\r\n"
+                      L"· 实时监视新目录，并按计划定时迁移\r\n"
+                      L"· 迁移前检测文件占用，避免正在使用的数据被搬走\r\n"
+                      L"· 崩溃残留自动恢复，绝不删除唯一副本\r\n"
+                      L"· 每规则独立白名单，配置多位置同步",
+                      0, 96, 720, 112, theme::FontSmall(), theme::TextSub);
 
-            g_hSvcState = CreateWindowExW(0, L"STATIC", L"未安装", WS_CHILD | WS_VISIBLE,
-                                          120, 210, 120, 20, parent, (HMENU)(INT_PTR)MainWindow::IDC_SVCSTATE, g_hInst, nullptr);
-            SetFont(g_hSvcState);
+            MakeLabel(parent, L"后台服务（开机自启动）", 0, 220, 400, 28, theme::FontH2(),
+                      theme::Text);
+            g_hSvcState = CreateWindowExW(0, L"STATIC", L"未安装", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                          theme::S(0), theme::S(254), theme::S(300), theme::S(22),
+                                          parent, (HMENU)(INT_PTR)MainWindow::IDC_SVCSTATE, g_hInst,
+                                          nullptr);
+            theme::ApplyFont(g_hSvcState, theme::FontBold());
+            SetLabelColor(g_hSvcState, g_svcColor);
 
-            struct
+            const struct
             {
                 int id;
                 const wchar_t *text;
-                int w;
-            } sb[] = {
-                {MainWindow::IDC_BTN_SVCINSTALL, L"安装服务", 90},
-                {MainWindow::IDC_BTN_SVCSTART, L"启动服务", 90},
-                {MainWindow::IDC_BTN_SVCSTOP, L"停止服务", 90},
-                {MainWindow::IDC_BTN_SVCREMOVE, L"卸载服务", 90},
+            } svc[] = {
+                {MainWindow::IDC_BTN_SVCINSTALL, L"安装服务"},
+                {MainWindow::IDC_BTN_SVCSTART, L"启动服务"},
+                {MainWindow::IDC_BTN_SVCSTOP, L"停止服务"},
+                {MainWindow::IDC_BTN_SVCREMOVE, L"卸载服务"},
             };
-            int x = 12;
-            for (auto &b : sb)
+            int x = 0;
+            for (const auto &b : svc)
             {
-                HWND h = CreateWindowExW(0, L"BUTTON", b.text, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                         x, 236, b.w, 26, parent, (HMENU)(INT_PTR)b.id, g_hInst, nullptr);
-                SetFont(h);
-                x += b.w + 6;
+                theme::CreateButton(parent, b.id, b.text, theme::BtnRole::BtnDefault, theme::S(x),
+                                    theme::S(286), theme::S(96), theme::S(34));
+                x += 104;
             }
+
+            MakeLabel(parent, L"服务在后台独立运行，退出本界面后仍会继续自动迁移。", 0, 340, 600, 20,
+                      theme::FontSmall(), theme::TextMuted);
         }
     } // namespace
 
     // ==================== 页面切换 ====================
     namespace
     {
-        // 所有分页子窗口句柄（0=规则 1=计划 2=关于）—— 已在文件顶部声明
-
         // 页面子窗口过程：把子控件的 WM_COMMAND / WM_NOTIFY 转发给主窗口，
         // 否则按钮点击只会发给页面窗口，主窗口收不到命令。
         LRESULT CALLBACK PageWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1996,15 +2078,54 @@ namespace dirmv::gui
             case WM_COMMAND:
             case WM_NOTIFY:
                 if (g_mainWnd)
-                {
-                    LRESULT r = SendMessageW(g_mainWnd, msg, wParam, lParam);
-                    return r;
-                }
+                    return SendMessageW(g_mainWnd, msg, wParam, lParam);
                 break;
+            case WM_ERASEBKGND:
+                return 1;
+            case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC dc = BeginPaint(hwnd, &ps);
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HBRUSH bg = CreateSolidBrush(theme::Bg);
+                FillRect(dc, &rc, bg);
+                DeleteObject(bg);
+                theme::RoundRectEx(dc, rc, theme::S(10), theme::Card, theme::Border, 1);
+                FramePageFields(hwnd, dc);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
             case WM_CTLCOLORSTATIC:
+            {
+                HDC dc = (HDC)wParam;
+                HWND ctl = (HWND)lParam;
+                SetBkMode(dc, TRANSPARENT);
+                COLORREF color = theme::Text;
+                HANDLE p = GetPropW(ctl, L"dirmv_clr");
+                if (p)
+                    color = (COLORREF)((INT_PTR)p - 1);
+                else if (GetDlgCtrlID(ctl) == MainWindow::IDC_SVCSTATE)
+                    color = g_svcColor;
+                SetTextColor(dc, color);
+                return (LRESULT)theme::CardBrush();
+            }
+            case WM_CTLCOLOREDIT:
+            {
+                HDC dc = (HDC)wParam;
+                SetBkColor(dc, theme::InputBg);
+                SetTextColor(dc, theme::Text);
+                return (LRESULT)theme::InputBrush();
+            }
+            case WM_CTLCOLORLISTBOX:
+            {
+                HDC dc = (HDC)wParam;
+                SetBkColor(dc, theme::InputBg);
+                SetTextColor(dc, theme::Text);
+                return (LRESULT)theme::InputBrush();
+            }
             case WM_CTLCOLORBTN:
-                // 让子控件使用默认背景
-                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
+                return (LRESULT)theme::CardBrush();
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
@@ -2020,7 +2141,7 @@ namespace dirmv::gui
             wc.hInstance = g_hInst;
             wc.lpszClassName = L"dirMoverPage";
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+            wc.hbrBackground = nullptr;
             RegisterClassExW(&wc);
             done = true;
         }
@@ -2029,27 +2150,24 @@ namespace dirmv::gui
         {
             EnsurePageClass();
             return CreateWindowExW(0, L"dirMoverPage", L"",
-                                   WS_CHILD | (visible ? WS_VISIBLE : 0),
-                                   x, y, w, h, parent, nullptr, g_hInst, nullptr);
+                                   WS_CHILD | (visible ? WS_VISIBLE : 0), x, y, w, h, parent,
+                                   nullptr, g_hInst, nullptr);
         }
 
         void ShowPage(int page)
         {
             g_curTab = page;
             for (int i = 0; i < 3; ++i)
+            {
                 if (g_pageHwnd[i])
                     ShowWindow(g_pageHwnd[i], (i == page) ? SW_SHOW : SW_HIDE);
+                if (g_hTabButtons[i])
+                    theme::SetTabActive(g_hTabButtons[i], i == page);
+            }
             if (page == PAGE_PLAN)
                 UpdateNextRunLabel();
             if (page == PAGE_ABOUT)
                 UpdateServiceState();
-        }
-
-        void OnTabChanged()
-        {
-            int sel = (int)SendMessageW(g_hTab, TCM_GETCURSEL, 0, 0);
-            if (sel >= 0)
-                ShowPage(sel);
         }
     } // namespace
 
@@ -2060,6 +2178,17 @@ namespace dirmv::gui
         {
             switch (id)
             {
+            // 顶部 Tab
+            case kTabIds[0]:
+                ShowPage(PAGE_RULES);
+                break;
+            case kTabIds[1]:
+                ShowPage(PAGE_PLAN);
+                break;
+            case kTabIds[2]:
+                ShowPage(PAGE_ABOUT);
+                break;
+
             // 规则页
             case MainWindow::IDC_BTN_ADD_RULE:
                 AddRuleFlow();
@@ -2170,37 +2299,36 @@ namespace dirmv::gui
             case WM_CREATE:
             {
                 g_mainWnd = hwnd;
-                NONCLIENTMETRICSW ncm{};
-                ncm.cbSize = sizeof(ncm);
-                SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0);
-                g_font = CreateFontIndirectW(&ncm.lfMessageFont);
+                g_font = theme::FontBody();
 
-                g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"",
-                                         WS_CHILD | WS_VISIBLE | TCS_TABS, 8, 8, 724, 620,
-                                         hwnd, (HMENU)(INT_PTR)MainWindow::IDC_TAB, g_hInst, nullptr);
-                SetFont(g_hTab);
-                TCITEMW ti{};
-                ti.mask = TCIF_TEXT;
-                ti.pszText = const_cast<LPWSTR>(L"规则");
-                TabCtrl_InsertItem(g_hTab, 0, &ti);
-                ti.pszText = const_cast<LPWSTR>(L"计划");
-                TabCtrl_InsertItem(g_hTab, 1, &ti);
-                ti.pszText = const_cast<LPWSTR>(L"关于");
-                TabCtrl_InsertItem(g_hTab, 2, &ti);
+                RECT crc{};
+                GetClientRect(hwnd, &crc);
+                const int cardX = theme::S(kCardX);
+                const int cardY = theme::S(kCardTop);
+                const int cardW = crc.right - 2 * cardX;
+                const int cardH = crc.bottom - cardY - theme::S(20);
 
-                RECT rc{};
-                GetClientRect(g_hTab, &rc);
-                TabCtrl_AdjustRect(g_hTab, FALSE, &rc);
-                int pw = rc.right - rc.left;
-                int ph = rc.bottom - rc.top;
-
-                g_pageHwnd[PAGE_RULES] = CreatePage(g_hTab, rc.left, rc.top, pw, ph, true);
-                g_pageHwnd[PAGE_PLAN] = CreatePage(g_hTab, rc.left, rc.top, pw, ph, false);
-                g_pageHwnd[PAGE_ABOUT] = CreatePage(g_hTab, rc.left, rc.top, pw, ph, false);
+                EnsureCheckImages();
+                for (int i = 0; i < kTabCount; ++i)
+                    g_pageHwnd[i] = CreatePage(hwnd, cardX, cardY, cardW, cardH, i == 0);
 
                 BuildRulePage(g_pageHwnd[PAGE_RULES]);
                 BuildPlanPage(g_pageHwnd[PAGE_PLAN]);
                 BuildAboutPage(g_pageHwnd[PAGE_ABOUT]);
+
+                // 顶部 Tab（分段控件）：放在 header 右侧
+                const int segW = kTabCount * theme::S(kTabW) +
+                                 (kTabCount - 1) * theme::S(kTabGap) + 2 * theme::S(kSegPad);
+                const int segX = crc.right - theme::S(24) - segW;
+                const int segY = theme::S(26);
+                static const wchar_t *tabLabels[kTabCount] = {L"规则", L"计划", L"关于"};
+                for (int i = 0; i < kTabCount; ++i)
+                {
+                    g_hTabButtons[i] = theme::CreateButton(
+                        hwnd, kTabIds[i], tabLabels[i], theme::BtnRole::BtnTab,
+                        segX + theme::S(kSegPad) + i * (theme::S(kTabW) + theme::S(kTabGap)),
+                        segY + theme::S(kSegPad), theme::S(kTabW), theme::S(kTabH));
+                }
 
                 WritePlanToUI(g_cfg);
                 RefreshRuleList();
@@ -2216,16 +2344,88 @@ namespace dirmv::gui
                 SetTimer(hwnd, 1, 2000, nullptr);
                 return 0;
             }
-            case WM_SIZE:
-                if (g_hTab)
-                    SetWindowPos(g_hTab, nullptr, 8, 8,
-                                 LOWORD(lParam) - 24, HIWORD(lParam) - 24, SWP_NOZORDER);
+            case WM_ERASEBKGND:
+                return 1;
+            case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC dc = BeginPaint(hwnd, &ps);
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HBRUSH bg = CreateSolidBrush(theme::Bg);
+                FillRect(dc, &rc, bg);
+                DeleteObject(bg);
+
+                RECT hdr{0, 0, rc.right, theme::S(kHeaderH)};
+                HBRUSH wb = CreateSolidBrush(theme::Card);
+                FillRect(dc, &hdr, wb);
+                DeleteObject(wb);
+                theme::Line(dc, 0, theme::S(kHeaderH) - 1, rc.right, theme::S(kHeaderH) - 1,
+                            theme::Border);
+
+                RECT tr{theme::S(24), theme::S(14), rc.right, theme::S(52)};
+                theme::TextIn(dc, tr, L"dirMover", theme::FontTitle(), theme::Text,
+                              DT_LEFT | DT_VCENTER | DT_SINGLELINE, 0);
+                RECT sr{theme::S(25), theme::S(52), rc.right, theme::S(72)};
+                theme::TextIn(dc, sr, L"目录迁移 · 链接管理", theme::FontSmall(), theme::TextMuted,
+                              DT_LEFT | DT_TOP | DT_SINGLELINE, 0);
+
+                // 分段控件底板
+                const int segW = kTabCount * theme::S(kTabW) +
+                                 (kTabCount - 1) * theme::S(kTabGap) + 2 * theme::S(kSegPad);
+                RECT seg{rc.right - theme::S(24) - segW, theme::S(26), rc.right - theme::S(24),
+                         theme::S(26) + theme::S(kTabH) + 2 * theme::S(kSegPad)};
+                theme::FillRound(dc, seg, theme::S(10), theme::SegBg);
+
+                EndPaint(hwnd, &ps);
                 return 0;
+            }
+            case WM_SIZE:
+            {
+                RECT crc{};
+                GetClientRect(hwnd, &crc);
+                const int cardX = theme::S(kCardX);
+                const int cardY = theme::S(kCardTop);
+                const int cardW = crc.right - 2 * cardX;
+                const int cardH = crc.bottom - cardY - theme::S(20);
+                for (int i = 0; i < kTabCount; ++i)
+                {
+                    if (g_pageHwnd[i])
+                        SetWindowPos(g_pageHwnd[i], nullptr, cardX, cardY, cardW, cardH,
+                                     SWP_NOZORDER | SWP_NOACTIVATE);
+                }
+                const int segW = kTabCount * theme::S(kTabW) +
+                                 (kTabCount - 1) * theme::S(kTabGap) + 2 * theme::S(kSegPad);
+                const int segX = crc.right - theme::S(24) - segW;
+                for (int i = 0; i < kTabCount; ++i)
+                {
+                    if (g_hTabButtons[i])
+                        SetWindowPos(g_hTabButtons[i], HWND_TOP,
+                                     segX + theme::S(kSegPad) +
+                                         i * (theme::S(kTabW) + theme::S(kTabGap)),
+                                     theme::S(26) + theme::S(kSegPad), theme::S(kTabW),
+                                     theme::S(kTabH), SWP_NOACTIVATE);
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             case WM_NOTIFY:
             {
                 LPNMHDR nh = (LPNMHDR)lParam;
-                if (nh->idFrom == MainWindow::IDC_TAB && nh->code == TCN_SELCHANGE)
-                    OnTabChanged();
+                if (nh->idFrom == MainWindow::IDC_RULE_LIST && nh->code == NM_CUSTOMDRAW)
+                {
+                    LPNMLVCUSTOMDRAW cd = (LPNMLVCUSTOMDRAW)lParam;
+                    if (cd->nmcd.dwDrawStage == CDDS_PREPAINT)
+                        return CDRF_NOTIFYITEMDRAW;
+                    if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT)
+                    {
+                        bool sel = (cd->nmcd.uItemState & CDIS_SELECTED) != 0;
+                        cd->clrTextBk = sel ? theme::AccentSoft : theme::Card;
+                        cd->clrText = sel ? theme::AccentPressed : theme::Text;
+                        return CDRF_NEWFONT;
+                    }
+                    return CDRF_DODEFAULT;
+                }
                 else if (nh->idFrom == MainWindow::IDC_RULE_LIST)
                 {
                     if (nh->code == LVN_ITEMCHANGED)
@@ -2374,11 +2574,12 @@ namespace dirmv::gui
 
         WNDCLASSEXW wc{};
         wc.cbSize = sizeof(wc);
+        wc.style = CS_HREDRAW | CS_VREDRAW;
         wc.lpfnWndProc = MainWndProc;
         wc.hInstance = hInst;
         wc.lpszClassName = L"dirMoverMainWnd";
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hbrBackground = nullptr;
         wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
         wc.hIconSm = wc.hIcon;
         RegisterClassExW(&wc);
@@ -2392,11 +2593,13 @@ namespace dirmv::gui
             g_cfg.ApplyDefaults();
         }
 
+        const DWORD style = WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME;
+        RECT rc{0, 0, theme::S(880), theme::S(760)};
+        AdjustWindowRectEx(&rc, style, FALSE, 0);
         HWND hwnd = CreateWindowExW(
-            0, L"dirMoverMainWnd", L"dirMover - 目录软链接迁移/恢复工具",
-            WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX & ~WS_THICKFRAME,
-            CW_USEDEFAULT, CW_USEDEFAULT, 760, 700,
-            nullptr, nullptr, hInst, nullptr);
+            0, L"dirMoverMainWnd", L"dirMover - 目录软链接迁移/恢复工具", style, CW_USEDEFAULT,
+            CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, hInst,
+            nullptr);
         if (!hwnd)
             return nullptr;
 

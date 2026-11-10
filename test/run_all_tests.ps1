@@ -1,7 +1,8 @@
 # ---------------------------------------------------------------------------
 # run_all_tests.ps1 - 一键运行全部测试
 #   1) clitest.ps1   —— 用「测试规则文件」通过 CLI 驱动，验证各项功能
-#   2) run_tests.ps1 —— 原有综合功能测试（57 项）
+#   2) guitest.ps1  —— GUI 冒烟测试（10 项）
+#   3) run_tests.ps1 —— 原有综合功能测试（58 项）
 #
 #   安全：全部在 test\sandbox 下操作，不碰真实目录。
 #   用法：powershell -ExecutionPolicy Bypass -File test\run_all_tests.ps1
@@ -12,6 +13,7 @@ $ErrorActionPreference = "Continue"
 
 $suites = @(
     @{ name = "CLI 全功能测试 (clitest)"; file = "clitest.ps1" },
+    @{ name = "GUI 冒烟测试 (guitest)"; file = "guitest.ps1" },
     @{ name = "综合功能测试 (run_tests)"; file = "run_tests.ps1" },
     @{ name = "迁移安全性测试 (safety_test)"; file = "safety_test.ps1" }
 )
