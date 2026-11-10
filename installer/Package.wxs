@@ -17,7 +17,7 @@
 
   <Package Name="dirMover 目录迁移工具"
            Manufacturer="dirMover"
-           Version="1.4.2.0"
+           Version="1.4.3.0"
            UpgradeCode="7F2C9E3A-4B51-4D6E-9A2F-1C8D5E7B0A31"
            Scope="perMachine"
            Compressed="yes">

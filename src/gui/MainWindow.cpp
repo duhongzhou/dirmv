@@ -337,6 +337,40 @@ namespace dirmv::gui
             }
         }
 
+        // 规则状态：不仅显示启用/停用，还反映后台服务是否真的在监视
+        std::wstring RuleStatusText(const Rule &r)
+        {
+            if (r.pendingDelete)
+                return L"待删除(还原失败)";
+            if (!r.enabled)
+                return L"已停用";
+            if (!g_cfg.ValidateOneRule(r).empty())
+                return L"不可用";
+            int svc = ServiceInstaller::QueryState(L"dirMoverSvc");
+            if (svc == 1)
+                return L"已启用 · 运行中";
+            if (svc == 2 || svc == 3)
+                return L"已启用 · 服务切换中";
+            if (svc == -2)
+                return L"已启用 · 服务未安装";
+            return L"已启用 · 后台已停止";
+        }
+
+        // 只刷新「状态」列（服务状态变化时由 WM_TIMER 调用）
+        void UpdateRuleStatuses()
+        {
+            if (!g_hRuleList)
+                return;
+            int n = (int)g_cfg.rules.size();
+            if (ListView_GetItemCount(g_hRuleList) != n)
+                return;
+            for (int i = 0; i < n; ++i)
+            {
+                std::wstring st = RuleStatusText(g_cfg.rules[i]);
+                ListView_SetItemText(g_hRuleList, i, 4, const_cast<LPWSTR>(st.c_str()));
+            }
+        }
+
         void RefreshRuleList()
         {
             if (!g_hRuleList)
@@ -369,11 +403,7 @@ namespace dirmv::gui
                 std::wstring ex = std::to_wstring(r.exclude.size());
                 ListView_SetItemText(g_hRuleList, (int)i, 3, const_cast<LPWSTR>(ex.c_str()));
 
-                std::wstring st = r.enabled ? L"已启用" : L"未启用";
-                if (r.pendingDelete)
-                    st = L"待删除(还原失败)";
-                else if (r.enabled && !g_cfg.ValidateOneRule(r).empty())
-                    st = L"不可用";
+                std::wstring st = RuleStatusText(r);
                 ListView_SetItemText(g_hRuleList, (int)i, 4, const_cast<LPWSTR>(st.c_str()));
 
                 // 第 5 列「操作」：显示「编辑」文本（点击该列即编辑本行规则）
@@ -1915,14 +1945,14 @@ namespace dirmv::gui
             SetWindowPos(g_hRuleList, nullptr, left, listTop, listW, listH,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             // 列宽：目录两列自适应，其余固定
-            int rest = listW - theme::S(36) - theme::S(62) - theme::S(110) - theme::S(88);
+            int rest = listW - theme::S(36) - theme::S(62) - theme::S(150) - theme::S(88);
             if (rest < theme::S(240))
                 rest = theme::S(240);
             ListView_SetColumnWidth(g_hRuleList, 0, theme::S(36));
             ListView_SetColumnWidth(g_hRuleList, 1, rest * 52 / 100);
             ListView_SetColumnWidth(g_hRuleList, 2, rest - rest * 52 / 100);
             ListView_SetColumnWidth(g_hRuleList, 3, theme::S(62));
-            ListView_SetColumnWidth(g_hRuleList, 4, theme::S(110));
+            ListView_SetColumnWidth(g_hRuleList, 4, theme::S(150));
             ListView_SetColumnWidth(g_hRuleList, 5, theme::S(88));
 
             if (g_hActLabel)
@@ -2792,6 +2822,9 @@ namespace dirmv::gui
                     HWND svc = g_pageHwnd[PAGE_SERVICE];
                     if (svc && IsWindowVisible(svc))
                         UpdateServiceState();
+                    HWND rules = g_pageHwnd[PAGE_RULES];
+                    if (rules && IsWindowVisible(rules))
+                        UpdateRuleStatuses();
                 }
                 return 0;
             case WM_CLOSE:
