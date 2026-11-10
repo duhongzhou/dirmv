@@ -12,12 +12,13 @@
 | 功能         | 说明                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------- |
 | 目录迁移     | 把监视目录下每个非白名单一级子目录迁移到目标目录                                      |
-| 创建链接     | 原位置创建**符号链接**（默认，需管理员）或**目录联接 Junction**                       |
+| 创建链接     | 原位置创建**符号链接**（默认，需管理员）或**目录联接 Junction**（无需管理员）         |
+| 崩溃安全     | 复制→校验→原子改名→建链接→删旧数据；**任何失败都不删除唯一副本**（详见「迁移安全性」） |
 | 白名单       | 内置系统目录白名单 + 用户自定义排除列表（每行一个）                                   |
 | 自动迁移     | ① 文件系统实时监视（`ReadDirectoryChangesW`，新目录立即迁移）② 定时扫描（可配置间隔） |
 | 进度与 ETA   | 迁移时显示进度条、已传输字节、速度与**预计完成时间**                                  |
 | 恢复         | 删除链接、把数据移回原位置（依据迁移日志 LINK\|src\|dst）                             |
-| 回滚         | 创建链接失败时自动把数据移回源目录                                                    |
+| 回滚         | 任何一步失败自动把数据/链接还原到迁移前状态                                           |
 | 多线程       | 前台 / 后台运行均可限制线程数（1–64）                                                 |
 | Windows 服务 | 注册为系统服务、**开机自动启动**、常驻后台自动/定时迁移                               |
 | 后台控制     | GUI 通过命名管道远程控制后台服务（迁移 / 恢复 / 状态 / 停止 / 重载）                  |
@@ -34,11 +35,35 @@
 - 目录枚举：`FindFirstFileExW` / `FindNextFileW`
 - 文件复制（带进度）：`CopyFileExW` + `CopyProgressRoutine`
 - 移动 / 删除：`MoveFileExW`、`DeleteFileW`、`RemoveDirectoryW`
-- 链接创建：`CreateSymbolicLinkW`（符号链接 / 目录联接）
+- 链接创建：`CreateSymbolicLinkW`（符号链接）、`FSCTL_SET_REPARSE_POINT`（目录联接）
 - 目录监视：`ReadDirectoryChangesW`
 - 服务：`CreateServiceW` / `StartServiceCtrlDispatcherW` / `RegisterServiceCtrlHandlerExW`
 - 进程间通信：命名管道 `CreateNamedPipeW` / `CreateFileW`
 - 托盘通知（"honk"）：`Shell_NotifyIconW`
+
+---
+
+## 迁移安全性（重要）
+
+迁移采用**五步安全顺序**，任何一步失败都会把数据/链接还原，**绝不会删除唯一副本**：
+
+```text
+1. 复制      源 → 目标（源保持不动）
+2. 校验      文件数与总字节数一致，否则删除目标副本并放弃
+3. 改名      源目录原子改名为 <名字>.dirmv-moving（链接名腾空，可随时改回）
+4. 建链接    <名字> → 目标；失败则把 .dirmv-moving 改回原名并删除目标副本
+5. 删旧数据  删除 .dirmv-moving；若有文件被占用则改名为 <名字>.dirmv-old 保留并告警
+```
+
+配套保护：
+
+- **占用检测**：迁移前、复制后各检测一次被打开的文件；命中则该目录标记为「占用」，**源数据一个字节都不动**
+- **失败冷却**：服务端对失败/被占用的目录记录冷却（失败 30 分钟、占用按 `RetryDelayMinutes`），
+  避免「监视触发 → 失败 → 再触发」的循环重试
+- **监视去抖**：5 秒内多次目录变化只触发一次迁移
+- **绝不覆盖**：目标已存在同名目录时一律跳过（无论 `SkipExisting` 取值）
+- **残留目录**：若旧数据仍被占用，会保留为 `<名字>.dirmv-old`（可用 `dirMover_cli.exe restore` 或手工处理），
+  下次扫描不会把它当成待迁移目录
 
 ---
 
@@ -117,7 +142,8 @@ powershell -ExecutionPolicy Bypass -File test\run_all_tests.ps1
 | ---------------------- | -------------------- | ------------------------------------------------------------------------------ |
 | **CLI 全功能测试**     | `test\clitest.ps1`   | 用「测试规则文件」通过 `dirMover_cli.exe` 驱动，逐项验证 **19** 个功能点       |
 | **GUI 自动化冒烟测试** | `test\guitest.ps1`   | 启动真实 GUI 窗口，用 `EnumWindows/SendMessage` 驱动，验证界面可用（**9** 项） |
-| **综合功能测试**       | `test\run_tests.ps1` | 原有全流程综合测试（**57** 项）                                                |
+| **综合功能测试**       | `test\run_tests.ps1` | 原有全流程综合测试（**58** 项）                                                |
+| **迁移安全性测试**     | `test\safety_test.ps1` | 验证「绝不删除唯一副本」：占用不迁移、无残留、真 Junction、白名单命令（**17** 项） |
 
 ### 测试规则文件
 
@@ -154,7 +180,7 @@ dotnet tool install --global wix --version 5.0.2
 powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
 ```
 
-产物：`installer\dist\dirMover-1.0.0.msi`
+产物：`installer\dist\dirMover-1.1.0.msi`
 
 安装包特性：
 
@@ -214,6 +240,8 @@ dirMover_cli.exe migrate                                 执行一次迁移
 dirMover_cli.exe restore                                 从日志恢复
 dirMover_cli.exe change-target --index 0 --newtarget D:\New   更换某规则目标目录
 dirMover_cli.exe restore-excluded --index 0 --name "Data"     还原目录（加入白名单前）
+dirMover_cli.exe exclude --index 0 --name ".dsh"              加入白名单(若已迁移先自动还原)
+dirMover_cli.exe unexclude --index 0 --name ".dsh"            从白名单移除
 dirMover_cli.exe adopt --index 0                              扫描接管已有迁移/链接
 dirMover_cli.exe rebuild --index 0 --watch "C:\New\Data"      新机器上重建链接
 dirMover_cli.exe import --dir "D:\DataStore" [--watch C:\New]  从目录配置导入规则
@@ -278,7 +306,7 @@ Enabled=1
 LinkType=0           ; 0=符号链接(需管理员) 1=目录联接
 MoveMode=1           ; 1=移动 0=复制保留
 SkipExisting=1       ; 目标已存在同名目录时跳过
-WorkerThreads=4      ; 线程数 1-64
+WorkerThreads=4      ; 线程数 0-64（0=自动）
 EnableWatcher=1      ; 启用实时监视
 
 [Schedule]
@@ -291,7 +319,7 @@ EveryNDays=3         ; 每N天模式
 
 [Lock]
 Detect=1             ; 启用占用检测
-RetryDelayMinutes=5  ; 占用后重试延迟(分钟)，仅一次
+RetryDelayMinutes=5  ; 占用后重试延迟(分钟)，仅一次；0=不自动重试
 Notify=1
 
 [Service]

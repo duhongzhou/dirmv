@@ -1,6 +1,6 @@
 <Project Sdk="WixToolset.Sdk/5.0.2">
     <PropertyGroup>
-        <OutputName>dirMover-1.0.0</OutputName>
+        <OutputName>dirMover-1.1.3</OutputName>
         <OutputType>Package</OutputType>
         <DefineConstants>Configuration=Release</DefineConstants>
     </PropertyGroup>

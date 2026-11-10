@@ -80,6 +80,10 @@ namespace dirmv
     };
     using LockListener = std::function<void(const LockNotice &)>;
 
+    // 跳过判定回调：参数为该子任务的完整源路径，返回 true 表示本次不处理
+    // （服务端用于「失败冷却」，避免风暴式重复尝试）
+    using SkipFn = std::function<bool(const std::wstring &srcPath)>;
+
     class MigrateEngine
     {
     public:
@@ -91,12 +95,14 @@ namespace dirmv
         // 执行全部启用规则的迁移（阻塞）
         MigrateResult Migrate(ProgressListener onProgress,
                               std::atomic<bool> *cancel = nullptr,
-                              LockListener onLock = nullptr);
+                              LockListener onLock = nullptr,
+                              SkipFn skip = nullptr);
 
         // 仅执行指定规则（服务/定时按规则触发）
         MigrateResult MigrateRule(const Rule &rule, ProgressListener onProgress,
                                   std::atomic<bool> *cancel = nullptr,
-                                  LockListener onLock = nullptr);
+                                  LockListener onLock = nullptr,
+                                  SkipFn skip = nullptr);
 
         // 从日志恢复：把所有 LINK 记录的数据移回原位置
         MigrateResult Restore(ProgressListener onProgress,

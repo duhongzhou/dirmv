@@ -4,8 +4,10 @@
 
 #include <windows.h>
 #include <restartmanager.h>
+#include <winioctl.h>
 #include <vector>
 #include <stack>
+#include <cstring>
 
 namespace dirmv
 {
@@ -13,6 +15,115 @@ namespace dirmv
     // -------------------- 辅助：遍历目录树 --------------------
     namespace
     {
+        // 目录联接的 REPARSE_DATA_BUFFER 布局（不引入 WDK 头文件）。
+        // 注意：MOUNT_POINT 结构没有 Flags 字段，ReparseDataLength = 8 + 路径字节。
+        struct JunctionReparseBuffer
+        {
+            ULONG ReparseTag;
+            USHORT ReparseDataLength;
+            USHORT Reserved;
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            WCHAR PathBuffer[1];
+        };
+
+        std::wstring Win32ErrorText(DWORD err)
+        {
+            wchar_t *msg = nullptr;
+            DWORD n = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                                         FORMAT_MESSAGE_FROM_SYSTEM |
+                                         FORMAT_MESSAGE_IGNORE_INSERTS,
+                                     nullptr, err, 0, (LPWSTR)&msg, 0, nullptr);
+            std::wstring s;
+            if (n && msg)
+            {
+                s.assign(msg, n);
+                while (!s.empty() && (s.back() == L'\r' || s.back() == L'\n' || s.back() == L' '))
+                    s.pop_back();
+            }
+            if (msg)
+                LocalFree(msg);
+            return s;
+        }
+
+        // 创建真正的目录联接（Junction）：不需要管理员权限。
+        // targetPath 必须已存在且为绝对路径。
+        bool CreateJunction(const std::wstring &linkPath, const std::wstring &targetPath,
+                            std::wstring *error)
+        {
+            auto fail = [&](const std::wstring &what, DWORD e)
+            {
+                if (error)
+                    *error = what + L"(错误 " + std::to_wstring(e) + L": " +
+                             Win32ErrorText(e) + L")";
+                return false;
+            };
+
+            if (!Path::DirectoryExists(targetPath))
+            {
+                if (error)
+                    *error = L"联接目标不存在: " + targetPath;
+                return false;
+            }
+            if (!CreateDirectoryW(linkPath.c_str(), nullptr))
+            {
+                DWORD e = GetLastError();
+                if (e == ERROR_ALREADY_EXISTS)
+                {
+                    if (error)
+                        *error = L"联接路径已存在: " + linkPath;
+                    return false;
+                }
+                return fail(L"创建联接目录失败", e);
+            }
+
+            HANDLE h = CreateFileW(linkPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                   OPEN_EXISTING,
+                                   FILE_FLAG_OPEN_REPARSE_POINT |
+                                       FILE_FLAG_BACKUP_SEMANTICS,
+                                   nullptr);
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                DWORD e = GetLastError();
+                RemoveDirectoryW(linkPath.c_str());
+                return fail(L"打开联接目录失败", e);
+            }
+
+            std::wstring subst = L"\\??\\" + targetPath;
+            size_t substBytes = subst.size() * sizeof(wchar_t);
+            size_t printBytes = targetPath.size() * sizeof(wchar_t);
+            size_t pathBytes = substBytes + sizeof(wchar_t) + printBytes + sizeof(wchar_t);
+            size_t total = 8 + 8 + pathBytes; // 公共头(8) + 偏移/长度(8) + 路径
+
+            std::vector<BYTE> buf(total, 0);
+            auto *p = reinterpret_cast<JunctionReparseBuffer *>(buf.data());
+            p->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+            p->ReparseDataLength = (USHORT)(8 + pathBytes);
+            p->Reserved = 0;
+            p->SubstituteNameOffset = 0;
+            p->SubstituteNameLength = (USHORT)substBytes;
+            p->PrintNameOffset = (USHORT)(substBytes + sizeof(wchar_t));
+            p->PrintNameLength = (USHORT)printBytes;
+            BYTE *pathStart = buf.data() + 16; // 结构体头固定 16 字节
+            std::memcpy(pathStart, subst.c_str(), substBytes);
+            std::memcpy(pathStart + substBytes + sizeof(wchar_t),
+                        targetPath.c_str(), printBytes);
+
+            DWORD returned = 0;
+            BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT,
+                                      buf.data(), (DWORD)total,
+                                      nullptr, 0, &returned, nullptr);
+            DWORD e = ok ? 0 : GetLastError();
+            CloseHandle(h);
+            if (!ok)
+            {
+                RemoveDirectoryW(linkPath.c_str());
+                return fail(L"设置联接重解析点失败", e);
+            }
+            return true;
+        }
 
         struct TreeEntry
         {
@@ -226,20 +337,63 @@ namespace dirmv
                 onProgress(done, total, e.relPath);
         }
 
-        // 删除源（移动语义）：先删文件，后删目录（自底向上）
+        // 删除源（移动语义）：先删文件，后删目录（自底向上）。
+        // 注意：任何一个源条目删除失败都必须计数并返回失败——
+        // 源目录残留会导致后续建链接失败(183)，绝不能静默忽略。
         if (deleteSrc && failures == 0 && !(cancel && cancel->load()))
         {
             for (auto it = entries.rbegin(); it != entries.rend(); ++it)
             {
-                if (!it->isDir)
-                    DeleteFileW(it->srcPath.c_str());
+                if (it->isDir)
+                    continue;
+                if (!DeleteFileW(it->srcPath.c_str()))
+                {
+                    ++failures;
+                    if (firstError && firstError->empty())
+                    {
+                        DWORD e = GetLastError();
+                        wchar_t buf[512];
+                        swprintf_s(buf, L"删除源文件失败(错误 %lu: %s): %s", e,
+                                   Win32ErrorText(e).c_str(), it->srcPath.c_str());
+                        *firstError = buf;
+                    }
+                }
             }
             for (auto it = entries.rbegin(); it != entries.rend(); ++it)
             {
-                if (it->isDir)
-                    RemoveDirectoryW(it->srcPath.c_str());
+                if (!it->isDir)
+                    continue;
+                if (!RemoveDirectoryW(it->srcPath.c_str()))
+                {
+                    DWORD e = GetLastError();
+                    if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
+                    {
+                        ++failures;
+                        if (firstError && firstError->empty())
+                        {
+                            wchar_t buf[512];
+                            swprintf_s(buf, L"删除源目录失败(错误 %lu: %s): %s", e,
+                                       Win32ErrorText(e).c_str(), it->srcPath.c_str());
+                            *firstError = buf;
+                        }
+                    }
+                }
             }
-            RemoveDirectoryW(src.c_str());
+            if (!RemoveDirectoryW(src.c_str()))
+            {
+                DWORD e = GetLastError();
+                if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
+                {
+                    ++failures;
+                    if (firstError && firstError->empty())
+                    {
+                        wchar_t buf[512];
+                        swprintf_s(buf, L"删除源根目录失败(错误 %lu: %s)，目录可能仍被占用: %s",
+                                   e, Win32ErrorText(e).c_str(), src.c_str());
+                        *firstError = buf;
+                    }
+                }
+            }
         }
         return failures;
     }
@@ -282,17 +436,28 @@ namespace dirmv
         }
         for (auto it = entries.rbegin(); it != entries.rend(); ++it)
         {
-            if (it->isDir)
-                RemoveDirectoryW(it->srcPath.c_str());
+            if (!it->isDir)
+                continue;
+            if (!RemoveDirectoryW(it->srcPath.c_str()))
+            {
+                DWORD e = GetLastError();
+                if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
+                {
+                    ok = false;
+                    if (firstError && firstError->empty())
+                        *firstError = L"删除目录失败(错误 " + std::to_wstring(e) + L"): " +
+                                      it->srcPath;
+                }
+            }
         }
         if (!RemoveDirectoryW(dir.c_str()))
         {
             DWORD e = GetLastError();
-            if (e != ERROR_FILE_NOT_FOUND)
+            if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND)
             {
                 ok = false;
                 if (firstError && firstError->empty())
-                    *firstError = L"删除目录失败: " + dir;
+                    *firstError = L"删除目录失败(错误 " + std::to_wstring(e) + L"): " + dir;
             }
         }
         return ok;
@@ -302,18 +467,47 @@ namespace dirmv
     bool FileEngine::CreateLink(const std::wstring &linkPath, const std::wstring &targetPath,
                                 bool useJunction, std::wstring *error)
     {
+        if (Path::IsReparsePoint(linkPath))
+        {
+            if (error)
+                *error = L"链接路径已是重解析点: " + linkPath;
+            return false;
+        }
         if (useJunction)
         {
-            // 目录联接：目标必须是绝对路径
-            return CreateSymbolicLinkW(linkPath.c_str(), targetPath.c_str(),
-                                       SYMBOLIC_LINK_FLAG_DIRECTORY) != FALSE;
+            // 真正的目录联接：不需要管理员权限（仅限本机 NTFS）
+            if (!Path::IsAbsolute(targetPath))
+            {
+                if (error)
+                    *error = L"联接目标必须是绝对路径: " + targetPath;
+                return false;
+            }
+            return CreateJunction(linkPath, targetPath, error);
         }
+
         // 目录符号链接（等价 mklink /d），需要管理员或开发者模式
-        DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
+        auto fail = [&](DWORD e)
+        {
+            if (error)
+            {
+                std::wstring hint;
+                if (e == ERROR_PRIVILEGE_NOT_HELD || e == ERROR_ACCESS_DENIED)
+                    hint = L"，需要管理员权限或已启用开发者模式";
+                else if (e == ERROR_ALREADY_EXISTS)
+                    hint = L"，路径已存在（源目录未被完全删除）";
+                wchar_t buf[512];
+                swprintf_s(buf, L"创建符号链接失败(错误 %lu: %s)%s: %s", e,
+                           Win32ErrorText(e).c_str(), hint.c_str(), linkPath.c_str());
+                *error = buf;
+            }
+            return false;
+        };
+
 #ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
 #define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
 #endif
-        flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+        DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY |
+                      SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
         if (CreateSymbolicLinkW(linkPath.c_str(), targetPath.c_str(), flags))
             return true;
 
@@ -322,14 +516,7 @@ namespace dirmv
         if (CreateSymbolicLinkW(linkPath.c_str(), targetPath.c_str(),
                                 SYMBOLIC_LINK_FLAG_DIRECTORY))
             return true;
-
-        if (error)
-        {
-            wchar_t buf[128];
-            swprintf_s(buf, L"CreateSymbolicLink 失败(错误 %lu)，需管理员权限", e);
-            *error = buf;
-        }
-        return false;
+        return fail(e);
     }
 
     bool FileEngine::RemoveLink(const std::wstring &linkPath, std::wstring *error)

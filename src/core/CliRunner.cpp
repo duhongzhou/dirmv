@@ -49,6 +49,8 @@ namespace dirmv
              L"  scan        列出待迁移目录\n"
              L"  change-target --index N --newtarget <目录>   更换某规则目标目录\n"
              L"  restore-excluded --index N --name <目录名>   还原（加入白名单前）\n"
+             L"  exclude --index N --name <目录名>            加入白名单(若已迁移会先还原)\n"
+             L"  unexclude --index N --name <目录名>          从白名单移除\n"
              L"  adopt --index N                              扫描接管已有迁移/链接\n"
              L"  rebuild --index N --watch <新监视目录>       新机器上重建链接\n"
              L"  delete-rule --index N                        删除规则(先还原再删除)\n"
@@ -184,8 +186,9 @@ namespace dirmv
             }
         }
 
-        // migrate / import：不做整份配置校验，交由命令逐条处理可用规则
-        bool perRuleCmd = (cmd == L"migrate" || cmd == L"import");
+        // migrate / import / exclude：不做整份配置校验，交由命令逐条处理可用规则
+        bool perRuleCmd = (cmd == L"migrate" || cmd == L"import" ||
+                           cmd == L"exclude" || cmd == L"unexclude");
         if (!perRuleCmd)
         {
             std::wstring verr = cfg.Validate();
@@ -311,6 +314,69 @@ namespace dirmv
             }
             WOut(L"\n还原失败: " + err2 + L"\n");
             return 2;
+        }
+        if (cmd == L"exclude" || cmd == L"unexclude")
+        {
+            if (ruleIndex < 0 || ruleIndex >= (int)cfg.rules.size())
+            {
+                WOut(L"用法: exclude|unexclude --index <N> --name <目录名> [--config <ini>]\n");
+                return 1;
+            }
+            if (excludeName.empty())
+            {
+                WOut(L"缺少 --name\n");
+                return 1;
+            }
+            Rule &rule = cfg.rules[ruleIndex];
+            bool adding = (cmd == L"exclude");
+            if (adding)
+            {
+                bool exists = false;
+                for (auto &e : rule.exclude)
+                    if (Path::Equals(e, excludeName))
+                    {
+                        exists = true;
+                        break;
+                    }
+                if (exists)
+                {
+                    WOut(L"该目录已在白名单中: " + excludeName + L"\n");
+                    return 0;
+                }
+                // 若该目录已被迁移（源是链接），先还原再进白名单，避免留下链接
+                std::atomic<bool> cancel{false};
+                std::wstring rerr = engine.RestoreExcluded(rule, excludeName, &cancel);
+                if (!rerr.empty())
+                {
+                    WOut(L"还原失败，未修改配置: " + rerr + L"\n");
+                    return 2;
+                }
+                rule.exclude.push_back(excludeName);
+            }
+            else
+            {
+                bool removed = false;
+                for (auto it = rule.exclude.begin(); it != rule.exclude.end(); ++it)
+                    if (Path::Equals(*it, excludeName))
+                    {
+                        rule.exclude.erase(it);
+                        removed = true;
+                        break;
+                    }
+                if (!removed)
+                {
+                    WOut(L"该目录不在白名单中: " + excludeName + L"\n");
+                    return 0;
+                }
+            }
+            if (!ConfigStore::Save(configPath, cfg))
+            {
+                WOut(L"保存配置失败\n");
+                return 2;
+            }
+            WOut(adding ? L"已保存：" + excludeName + L" 已加入白名单\n"
+                        : L"已保存：" + excludeName + L" 已从白名单移除\n");
+            return 0;
         }
         if (cmd == L"adopt")
         {

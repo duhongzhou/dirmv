@@ -17,7 +17,13 @@ namespace dirmv
                 *error = L"无法打开服务管理器（需管理员权限）";
             return false;
         }
-        std::wstring binPath = L"\"" + Path::ExePath() + L"\" --service";
+        // 服务宿主应为同目录下的 dirMover.exe：
+        // 通过 dirMover_cli.exe 安装时也不能把服务注册成控制台程序。
+        std::wstring hostExe = Path::ExePath();
+        std::wstring guiExe = Path::Combine(Path::ExeDir(), L"dirMover.exe");
+        if (Path::FileExists(guiExe))
+            hostExe = guiExe;
+        std::wstring binPath = L"\"" + hostExe + L"\" --service";
 
         SC_HANDLE svc = CreateServiceW(
             scm, serviceName.c_str(), displayName.c_str(),

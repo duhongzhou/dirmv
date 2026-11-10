@@ -18,6 +18,30 @@ namespace dirmv
         return Path::Combine(targetDir, L"link_restore_log.txt");
     }
 
+    namespace
+    {
+        // 迁移过程中的临时目录后缀：源目录被原子改名到这里，然后创建链接，
+        // 最后才删除旧数据。任何一步失败都可以安全还原。
+        constexpr const wchar_t *kMovingSuffix = L".dirmv-moving";
+        constexpr const wchar_t *kOldSuffix = L".dirmv-old";
+
+        bool HasTempSuffix(const std::wstring &name)
+        {
+            auto endsWith = [&](const wchar_t *s)
+            {
+                size_t n = wcslen(s);
+                return name.size() >= n &&
+                       _wcsicmp(name.c_str() + (name.size() - n), s) == 0;
+            };
+            return endsWith(kMovingSuffix) || endsWith(kOldSuffix);
+        }
+
+        std::wstring ErrText(const std::wstring &msg, DWORD e)
+        {
+            return msg + L"(错误 " + std::to_wstring(e) + L")";
+        }
+    } // namespace
+
     std::vector<std::wstring> MigrateEngine::ScanPending(const Rule &rule) const
     {
         std::vector<std::wstring> pending;
@@ -25,6 +49,9 @@ namespace dirmv
         for (auto &name : subdirs)
         {
             if (cfg_.IsExcluded(name, rule))
+                continue;
+            // 自身迁移过程中的临时目录不能再被当作迁移对象
+            if (HasTempSuffix(name))
                 continue;
             std::wstring src = Path::Combine(rule.watchDir, name);
             if (Path::IsReparsePoint(src))
@@ -109,7 +136,8 @@ namespace dirmv
     }
 
     // ---------------------------------------------------------------------------
-    // 单个子任务迁移（原子）
+    // 单个子任务迁移（安全顺序：复制 → 校验 → 原子改名 → 建链接 → 删旧数据）
+    //   不变量：任何失败路径都至少保留一份完整数据；绝不删除唯一副本。
     // ---------------------------------------------------------------------------
     void MigrateEngine::MigrateSubtask(const Rule &rule, const std::wstring &name,
                                        SubtaskInfo &info, ProgressFn cb,
@@ -119,15 +147,32 @@ namespace dirmv
         (void)onProgress;
         std::wstring src = Path::Combine(rule.watchDir, name);
         std::wstring dst = Path::Combine(rule.targetDir, name);
+        std::wstring moving = src + kMovingSuffix;
+        std::wstring old = src + kOldSuffix;
         info.name = name;
         info.src = src;
         info.dst = dst;
+
+        auto finish = [&](SubtaskState st, const std::wstring &msg)
+        {
+            info.state = st;
+            info.message = msg;
+            if (!msg.empty())
+                LOGW(L"[" + name + L"] " + msg);
+        };
 
         DirStat st;
         FileEngine::Scan(src, st, cancel);
         info.bytes = st.totalBytes;
 
-        // --- 占用检测：若任何文件被占用，直接判定该子任务为 Locked（不半迁移）---
+        // 1) 目标已存在：绝不覆盖
+        if (Path::DirectoryExists(dst))
+        {
+            finish(SubtaskState::Skipped, L"目标已存在，跳过（避免覆盖）");
+            return;
+        }
+
+        // 2) 迁移前占用检测
         if (cfg_.lockDetectEnabled)
         {
             auto locks = FileEngine::DetectLocks(src);
@@ -136,93 +181,120 @@ namespace dirmv
                 info.state = SubtaskState::Locked;
                 info.locks = std::move(locks);
                 info.message = L"检测到 " + std::to_wstring(info.locks.size()) +
-                               L" 个被占用的文件";
+                               L" 个被占用的文件，本次不迁移";
                 LOGW(L"[占用] " + name + L" : " + info.message);
                 return;
             }
         }
 
-        // 目标已存在
-        if (Path::DirectoryExists(dst) && cfg_.skipExisting)
-        {
-            info.state = SubtaskState::Skipped;
-            info.message = L"目标已存在，跳过";
-            return;
-        }
-
-        // --- 复制/移动 ---
+        // 3) 复制到目标（源保持原样；失败只需清掉半成品目标）
         std::wstring err;
-        int failures = 0;
-        if (cfg_.moveMode)
-            failures = FileEngine::MoveTree(src, dst, cb, cancel, &err);
-        else
-            failures = FileEngine::CopyTree(src, dst, cb, cancel, &err);
-
+        int failures = FileEngine::CopyTree(src, dst, cb, cancel, &err);
         if (failures != 0 || (cancel && cancel->load()))
         {
-            // 原子回滚：尽力把已复制的数据清掉/整回到原样
-            LOGW(L"[失败] " + name + L" : " + (err.empty() ? L"复制出错" : err) + L"，回滚");
-            if (cfg_.moveMode)
-            {
-                // 移动模式：MoveTree 失败可能已部分移动，尝试把存在的目标数据移回
-                if (Path::DirectoryExists(dst))
-                {
-                    // 若源目录仍有内容则需合并；简单起见把目标剩余内容搬回源
-                    std::wstring rerr;
-                    if (!Path::DirectoryExists(src))
-                        FileEngine::MoveTree(dst, src, nullptr, nullptr, &rerr);
-                    else
-                        FileEngine::RemoveTree(dst, &rerr);
-                }
-            }
-            else
-            {
-                // 复制模式：源未动，清掉半成品目标
-                std::wstring rerr;
-                if (Path::DirectoryExists(dst))
-                    FileEngine::RemoveTree(dst, &rerr);
-            }
-            info.state = SubtaskState::Failed;
-            info.message = err.empty() ? L"复制出错" : err;
+            FileEngine::RemoveTree(dst, nullptr); // 源未动，安全
+            finish(SubtaskState::Failed, err.empty() ? L"复制出错，已回滚" : err);
             return;
         }
 
-        // 复制模式下源目录仍在，需删除后再建链接
-        if (!cfg_.moveMode)
+        // 4) 校验复制完整性（文件数 + 字节数）
+        DirStat dstat;
+        FileEngine::Scan(dst, dstat, nullptr);
+        if (dstat.fileCount != st.fileCount || dstat.totalBytes != st.totalBytes)
         {
-            std::wstring derr;
-            if (!FileEngine::RemoveTree(src, &derr))
+            FileEngine::RemoveTree(dst, nullptr);
+            finish(SubtaskState::Failed, L"复制校验失败(文件数/大小不一致)，已回滚");
+            return;
+        }
+
+        // 5) 复制期间目录可能被程序打开：再检测一次，绝不带着打开的文件迁移
+        if (cfg_.lockDetectEnabled)
+        {
+            auto locks = FileEngine::DetectLocks(src);
+            if (!locks.empty())
             {
-                // 删除源失败 → 该子任务失败，回滚目标
-                LOGW(L"复制模式删除源目录失败: " + src + L"，回滚");
-                FileEngine::RemoveTree(dst, nullptr);
-                info.state = SubtaskState::Failed;
-                info.message = L"删除源目录失败: " + derr;
+                FileEngine::RemoveTree(dst, nullptr); // 源未动，安全
+                info.state = SubtaskState::Locked;
+                info.locks = std::move(locks);
+                info.message = L"复制期间检测到 " + std::to_wstring(info.locks.size()) +
+                               L" 个文件被占用，已放弃本次迁移（未删任何源数据）";
+                LOGW(L"[占用] " + name + L" : " + info.message);
                 return;
             }
         }
 
-        // --- 创建链接 ---
-        std::wstring lerr;
-        bool isJunction = (cfg_.linkType == LinkType::Junction);
-        if (FileEngine::CreateLink(src, dst, isJunction, &lerr))
+        // 6) 原子改名：源 → 临时目录（链接名腾空，且可随时改回）。
+        //    若之前遗留了同名临时目录，改名保留而不是删除，避免误删数据。
+        if (Path::DirectoryExists(moving))
         {
-            info.state = SubtaskState::Migrated;
-            AppendLinkLog(rule.targetDir, src, dst);
-            LOGI(L"[完成] " + name);
+            std::wstring keep = old;
+            for (int i = 1; Path::DirectoryExists(keep) && i < 100; ++i)
+                keep = old + L"." + std::to_wstring(i);
+            if (!MoveFileExW(moving.c_str(), keep.c_str(), 0))
+            {
+                finish(SubtaskState::Failed, L"存在残留临时目录且无法移动: " + moving);
+                return;
+            }
+            LOGW(L"[清理] 发现上次残留的临时目录，已保留为: " + keep);
+        }
+        if (!MoveFileExW(src.c_str(), moving.c_str(), 0))
+        {
+            DWORD e = GetLastError();
+            FileEngine::RemoveTree(dst, nullptr); // 源未动，安全
+            finish(SubtaskState::Failed,
+                   L"源目录被占用，无法重命名，已回滚" + ErrText(L"", e));
+            return;
+        }
+
+        // 7) 建链接
+        bool isJunction = (cfg_.linkType == LinkType::Junction);
+        std::wstring lerr;
+        if (!FileEngine::CreateLink(src, dst, isJunction, &lerr))
+        {
+            // 还原：临时目录改回原名；此刻源数据完好无损
+            if (Path::DirectoryExists(src) && FileEngine::IsEmptyDir(src))
+                RemoveDirectoryW(src.c_str());
+            if (MoveFileExW(moving.c_str(), src.c_str(), 0))
+            {
+                FileEngine::RemoveTree(dst, nullptr);
+            }
+            else
+            {
+                LOGW(L"[严重] 源目录未能还原，数据同时保留在: " + moving + L" 与 " + dst);
+            }
+            finish(SubtaskState::Failed, lerr);
+            return;
+        }
+
+        // 8) 链接已就绪，删除旧数据（临时目录）。
+        //    若仍有文件被占用，绝不强行删除，改名保留为 .dirmv-old 并告警。
+        auto keepLeftover = [&]()
+        {
+            std::wstring keep = old;
+            for (int i = 1; Path::DirectoryExists(keep) && i < 100; ++i)
+                keep = old + L"." + std::to_wstring(i);
+            if (!MoveFileExW(moving.c_str(), keep.c_str(), 0))
+                keep = moving;
+            LOGW(L"[清理] 旧数据未能完全删除，已保留为: " + keep +
+                 L"（数据已完整迁移到 " + dst + L"）");
+        };
+        if (cfg_.lockDetectEnabled && !FileEngine::DetectLocks(moving).empty())
+        {
+            keepLeftover();
         }
         else
         {
-            // 回滚：把数据整体移回源，保证源目录结构完整
-            LOGW(L"[链接失败] " + name + L" : " + lerr + L"，正在回滚");
-            std::wstring rerr;
-            if (!Path::DirectoryExists(src))
-                FileEngine::MoveTree(dst, src, nullptr, nullptr, &rerr);
-            else if (Path::DirectoryExists(dst))
-                FileEngine::RemoveTree(dst, &rerr);
-            info.state = SubtaskState::Failed;
-            info.message = lerr;
+            std::wstring derr;
+            if (!FileEngine::RemoveTree(moving, &derr))
+            {
+                LOGW(L"[清理] " + derr);
+                keepLeftover();
+            }
         }
+
+        info.state = SubtaskState::Migrated;
+        AppendLinkLog(rule.targetDir, src, dst);
+        LOGI(L"[完成] " + name);
     }
 
     // ---------------------------------------------------------------------------
@@ -231,11 +303,28 @@ namespace dirmv
     MigrateResult MigrateEngine::MigrateRule(const Rule &rule,
                                              ProgressListener onProgress,
                                              std::atomic<bool> *cancel,
-                                             LockListener onLock)
+                                             LockListener onLock,
+                                             SkipFn skip)
     {
         MigrateResult result;
 
         auto names = ScanPending(rule);
+        if (skip && !names.empty())
+        {
+            std::vector<std::wstring> kept;
+            kept.reserve(names.size());
+            for (auto &n : names)
+            {
+                std::wstring full = Path::Combine(rule.watchDir, n);
+                if (skip(full))
+                {
+                    LOGI(L"[冷却] 跳过（近期失败，稍后重试）: " + n);
+                    continue;
+                }
+                kept.push_back(n);
+            }
+            names.swap(kept);
+        }
         result.total = (int)names.size();
         if (names.empty())
         {
@@ -366,6 +455,13 @@ namespace dirmv
         };
 
         int nthreads = cfg_.workerThreads;
+        if (nthreads <= 0) // 0 = 自动：按 CPU 核心数（上限 8）
+        {
+            unsigned hw = std::thread::hardware_concurrency();
+            nthreads = (hw == 0) ? 4 : (int)hw;
+            if (nthreads > 8)
+                nthreads = 8;
+        }
         if (nthreads < 1)
             nthreads = 1;
         if (nthreads > 64)
@@ -393,7 +489,8 @@ namespace dirmv
 
     MigrateResult MigrateEngine::Migrate(ProgressListener onProgress,
                                          std::atomic<bool> *cancel,
-                                         LockListener onLock)
+                                         LockListener onLock,
+                                         SkipFn skip)
     {
         MigrateResult total;
         int skippedRules = 0;
@@ -413,7 +510,7 @@ namespace dirmv
                 continue;
             }
 
-            auto r = MigrateRule(rule, onProgress, cancel, onLock);
+            auto r = MigrateRule(rule, onProgress, cancel, onLock, skip);
             total.total += r.total;
             total.migrated += r.migrated;
             total.skipped += r.skipped;

@@ -12,7 +12,8 @@ $ErrorActionPreference = "Continue"
 
 $suites = @(
     @{ name = "CLI 全功能测试 (clitest)"; file = "clitest.ps1" },
-    @{ name = "综合功能测试 (run_tests)"; file = "run_tests.ps1" }
+    @{ name = "综合功能测试 (run_tests)"; file = "run_tests.ps1" },
+    @{ name = "迁移安全性测试 (safety_test)"; file = "safety_test.ps1" }
 )
 
 $results = @()

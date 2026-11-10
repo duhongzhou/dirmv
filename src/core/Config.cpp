@@ -198,10 +198,10 @@ namespace dirmv
                 return L"第 " + std::to_wstring(i + 1) + L" 条规则的监视目录不存在: " + w;
         }
 
-        if (workerThreads < 1 || workerThreads > 64)
-            return L"线程数必须在 1..64 之间";
-        if (retryDelayMinutes < 1 || retryDelayMinutes > 1440)
-            return L"重试延迟必须在 1..1440 分钟之间";
+        if (workerThreads < 0 || workerThreads > 64)
+            return L"线程数必须在 0..64 之间（0 表示自动）";
+        if (retryDelayMinutes < 0 || retryDelayMinutes > 1440)
+            return L"重试延迟必须在 0..1440 分钟之间（0 表示不自动重试）";
 
         if (schedule.hour < 0 || schedule.hour > 23)
             return L"定时时刻(小时)必须在 0..23 之间";

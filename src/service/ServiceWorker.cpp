@@ -41,6 +41,45 @@ namespace dirmv
     void ServiceWorker::RequestResume() { paused_ = false; }
 
     // ---------------------------------------------------------------------------
+    // 失败冷却
+    // ---------------------------------------------------------------------------
+    bool ServiceWorker::CoolingDown(const std::wstring &srcPath)
+    {
+        std::lock_guard<std::mutex> lk(cooldownMtx_);
+        auto it = cooldownUntil_.find(srcPath);
+        if (it == cooldownUntil_.end())
+            return false;
+        if (it->second <= (int64_t)time(nullptr))
+        {
+            cooldownUntil_.erase(it);
+            return false;
+        }
+        return true;
+    }
+
+    void ServiceWorker::CoolDown(const std::wstring &srcPath, int seconds)
+    {
+        if (seconds <= 0)
+            return;
+        std::lock_guard<std::mutex> lk(cooldownMtx_);
+        cooldownUntil_[srcPath] = (int64_t)time(nullptr) + seconds;
+        // 顺手清理已过期项，避免长期运行时无限增长
+        for (auto it = cooldownUntil_.begin(); it != cooldownUntil_.end();)
+        {
+            if (it->second <= (int64_t)time(nullptr))
+                it = cooldownUntil_.erase(it);
+            else
+                ++it;
+        }
+    }
+
+    void ServiceWorker::ClearCooldowns()
+    {
+        std::lock_guard<std::mutex> lk(cooldownMtx_);
+        cooldownUntil_.clear();
+    }
+
+    // ---------------------------------------------------------------------------
     void ServiceWorker::OnLockNotice(const LockNotice &notice)
     {
         // 汇总占用信息
@@ -83,6 +122,13 @@ namespace dirmv
         if (notice.locks.empty())
             return;
 
+        // 0 分钟 = 不自动重试
+        if (delay <= 0)
+        {
+            LOGE(L"[占用] 未启用自动重试（RetryDelayMinutes=0）");
+            return;
+        }
+
         // 创建一次性重试计划任务（只创建一次）
         std::wstring exePath = Path::ExePath();
         std::wstring cfgPath = ConfigStore::DefaultPath();
@@ -93,7 +139,8 @@ namespace dirmv
     }
 
     // ---------------------------------------------------------------------------
-    void ServiceWorker::TriggerMigrate(bool async, const std::wstring &onlyWatchDir)
+    void ServiceWorker::TriggerMigrate(bool async, const std::wstring &onlyWatchDir,
+                                       bool manual)
     {
         if (busy_.exchange(true))
         {
@@ -101,6 +148,8 @@ namespace dirmv
             return;
         }
         cancel_ = false;
+        if (manual)
+            ClearCooldowns();
 
         auto job = [this, onlyWatchDir]()
         {
@@ -111,6 +160,22 @@ namespace dirmv
             }
 
             MigrateEngine engine(local);
+
+            // 失败冷却：服务进程内记录，避免监视风暴下反复重试同一目录
+            SkipFn skip = [this](const std::wstring &src)
+            { return CoolingDown(src); };
+
+            auto recordCooldown = [this, &local](const MigrateResult &r)
+            {
+                int retryMin = local.retryDelayMinutes > 0 ? local.retryDelayMinutes : 5;
+                for (auto &st : r.subtasks)
+                {
+                    if (st.state == SubtaskState::Locked)
+                        CoolDown(st.src, (retryMin < 1 ? 1 : retryMin) * 60);
+                    else if (st.state == SubtaskState::Failed)
+                        CoolDown(st.src, 1800); // 失败目录 30 分钟内不自动重试
+                }
+            };
 
             // 指定了某条规则的监视目录：只迁移这一条（供 GUI 触发使用）。
             if (!onlyWatchDir.empty())
@@ -142,7 +207,9 @@ namespace dirmv
                 auto result = engine.MigrateRule(*target,
                                                  nullptr, &cancel_,
                                                  [this](const LockNotice &n)
-                                                 { OnLockNotice(n); });
+                                                 { OnLockNotice(n); },
+                                                 skip);
+                recordCooldown(result);
                 {
                     std::lock_guard<std::mutex> lk(lastRunMtx_);
                     lastRunInfo_ = L"迁移完成(单条): 总 " + std::to_wstring(result.total) +
@@ -178,7 +245,9 @@ namespace dirmv
             auto result = engine.Migrate(
                 nullptr, &cancel_,
                 [this](const LockNotice &n)
-                { OnLockNotice(n); });
+                { OnLockNotice(n); },
+                skip);
+            recordCooldown(result);
 
             {
                 std::lock_guard<std::mutex> lk(lastRunMtx_);
@@ -218,7 +287,8 @@ namespace dirmv
         }
         case PipeCommand::Migrate:
             // arg 为要迁移的规则「监视目录」；为空表示迁移全部可用规则（定时/自动）
-            TriggerMigrate(true, Path::Trim(arg));
+            // 人工触发的迁移不受失败冷却限制，立即重试。
+            TriggerMigrate(true, Path::Trim(arg), true);
             return L"{\"ok\":true,\"msg\":\"迁移已开始\"}";
         case PipeCommand::Restore:
         {
@@ -291,11 +361,18 @@ namespace dirmv
             auto w = std::make_unique<DirectoryWatcher>();
             w->Start(r.watchDir, [this](const std::wstring & /*full*/)
                      {
-                         if (!paused_ && !busy_)
-                         {
-                             LOGI(L"监视触发迁移");
-                             TriggerMigrate(true);
-                         } });
+                         if (paused_ || busy_)
+                             return;
+                         // 去抖：目录活动频繁时（如应用持续写日志）限制触发频率，
+                         // 避免「触发→迁移→再触发」的循环。
+                         int64_t now = (int64_t)time(nullptr);
+                         int64_t last = lastWatcherTrigger_.load();
+                         if (now - last < 5)
+                             return;
+                         lastWatcherTrigger_ = now;
+                         LOGI(L"监视触发迁移");
+                         TriggerMigrate(true, L"", false);
+                     });
             watchers_.push_back(std::move(w));
             LOGI(L"[监视] 已监视目录: " + r.watchDir);
         }
@@ -361,7 +438,7 @@ namespace dirmv
                 {
                     LOGI(L"到达定时点，触发迁移");
                     if (!busy_)
-                        TriggerMigrate(true);
+                        TriggerMigrate(true, L"", false);
                     // 重新计算下一次
                     std::lock_guard<std::mutex> lk(cfgMtx_);
                     NextRun nx = Scheduler::ComputeNextRun(cfg_.schedule, time(nullptr));
